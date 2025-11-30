@@ -591,6 +591,168 @@ def create_management_app(
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
+    # ==================== Chat API ====================
+
+    @app.route('/api/chat/context')
+    def get_chat_context():
+        """Return database context for Claude's system prompt."""
+        if not app.config['db_connection']:
+            return jsonify({'error': 'Database not configured'}), 400
+
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(app.config['db_connection'])
+            cur = conn.cursor()
+            schema_name = app.config['schema']
+
+            # Get all tables in schema
+            cur.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = %s AND table_type = 'BASE TABLE'
+            """, (schema_name,))
+            tables = [row[0] for row in cur.fetchall()]
+
+            schema_info = {}
+            samples = {}
+
+            for table in tables:
+                full_name = f"{schema_name}.{table}"
+
+                # Get column info
+                cur.execute("""
+                    SELECT column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = %s AND table_name = %s
+                    ORDER BY ordinal_position
+                """, (schema_name, table))
+                columns = [{'name': row[0], 'type': row[1]} for row in cur.fetchall()]
+
+                # Get geometry info if exists
+                cur.execute("""
+                    SELECT type, srid
+                    FROM geometry_columns
+                    WHERE f_table_schema = %s AND f_table_name = %s
+                    LIMIT 1
+                """, (schema_name, table))
+                geom_row = cur.fetchone()
+
+                # Get row count
+                cur.execute(f'SELECT COUNT(*) FROM "{schema_name}"."{table}"')
+                row_count = cur.fetchone()[0]
+
+                schema_info[full_name] = {
+                    'columns': columns,
+                    'geometry_type': geom_row[0] if geom_row else None,
+                    'srid': geom_row[1] if geom_row else None,
+                    'row_count': row_count
+                }
+
+                # Get sample data (3 rows, excluding geometry)
+                non_geom_cols = [c['name'] for c in columns if c['type'] != 'USER-DEFINED']
+                if non_geom_cols:
+                    cols_sql = ', '.join([f'"{c}"' for c in non_geom_cols[:10]])
+                    cur.execute(f'SELECT {cols_sql} FROM "{schema_name}"."{table}" LIMIT 3')
+                    sample_rows = []
+                    for row in cur.fetchall():
+                        sample_row = {}
+                        for i, val in enumerate(row):
+                            col_name = non_geom_cols[i] if i < len(non_geom_cols) else f'col_{i}'
+                            if hasattr(val, 'isoformat'):
+                                sample_row[col_name] = val.isoformat()
+                            else:
+                                sample_row[col_name] = val
+                        sample_rows.append(sample_row)
+                    samples[full_name] = sample_rows
+
+            cur.close()
+            conn.close()
+
+            return jsonify({
+                'schema': schema_info,
+                'samples': samples,
+                'metadata': {
+                    'schema_name': schema_name,
+                    'coordinate_system': 'SWEREF99 TM (EPSG:3006)',
+                    'total_tables': len(tables)
+                }
+            })
+
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/chat/query', methods=['POST'])
+    def execute_chat_query():
+        """Execute validated read-only SQL query."""
+        import re
+        import time
+
+        if not app.config['db_connection']:
+            return jsonify({'error': 'Database not configured'}), 400
+
+        data = request.get_json()
+        if not data or 'sql' not in data:
+            return jsonify({'error': 'Missing sql parameter'}), 400
+
+        sql = data['sql'].strip()
+
+        # Validate read-only (basic check)
+        sql_upper = sql.upper()
+        forbidden = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'CREATE', 'ALTER', 'TRUNCATE', 'GRANT', 'REVOKE']
+        for word in forbidden:
+            if re.search(r'\b' + word + r'\b', sql_upper):
+                return jsonify({'error': f'Query contains forbidden keyword: {word}'}), 400
+
+        if not sql_upper.startswith('SELECT'):
+            return jsonify({'error': 'Only SELECT queries are allowed'}), 400
+
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(app.config['db_connection'])
+            cur = conn.cursor()
+
+            # Set statement timeout (30 seconds)
+            cur.execute("SET statement_timeout = '30s'")
+
+            start_time = time.time()
+            cur.execute(sql)
+
+            # Limit results
+            rows = cur.fetchmany(1000)
+            columns = [desc[0] for desc in cur.description] if cur.description else []
+
+            # Convert to list of dicts
+            results = []
+            for row in rows:
+                row_dict = {}
+                for i, val in enumerate(row):
+                    if hasattr(val, 'isoformat'):
+                        row_dict[columns[i]] = val.isoformat()
+                    elif isinstance(val, (bytes, memoryview)):
+                        row_dict[columns[i]] = '<binary>'
+                    else:
+                        row_dict[columns[i]] = val
+                results.append(row_dict)
+
+            execution_time = (time.time() - start_time) * 1000
+
+            cur.close()
+            conn.close()
+
+            return jsonify({
+                'success': True,
+                'results': results,
+                'row_count': len(results),
+                'columns': columns,
+                'execution_time_ms': round(execution_time, 2),
+                'truncated': len(rows) == 1000
+            })
+
+        except Exception as e:
+            return jsonify({'error': f'Database error: {str(e)}'}), 400
+
     return app
 
 
@@ -1998,6 +2160,207 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 height: 500px;
             }
         }
+
+        /* Chat Widget Styles */
+        .chat-toggle {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--gold), #c9a82e);
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 20px rgba(250, 218, 54, 0.4);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .chat-toggle:hover {
+            transform: scale(1.05);
+            box-shadow: 0 6px 24px rgba(250, 218, 54, 0.5);
+        }
+        .chat-toggle svg {
+            width: 28px;
+            height: 28px;
+            fill: var(--dark-bg);
+        }
+        .chat-window {
+            position: fixed;
+            bottom: 90px;
+            right: 24px;
+            width: 400px;
+            height: 500px;
+            background: var(--dark-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            z-index: 1001;
+            display: none;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .chat-window.open { display: flex; }
+        .chat-header {
+            padding: 16px;
+            background: var(--dark-secondary);
+            border-bottom: 1px solid var(--border-subtle);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .chat-header h3 {
+            margin: 0;
+            color: var(--gold);
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .chat-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0;
+            line-height: 1;
+        }
+        .chat-close:hover { color: var(--text-primary); }
+        .chat-api-key {
+            padding: 12px 16px;
+            background: var(--dark-secondary);
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        .chat-api-key input {
+            width: 100%;
+            padding: 8px 12px;
+            background: var(--dark-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            color: var(--text-primary);
+            font-size: 13px;
+            font-family: inherit;
+        }
+        .chat-api-key input::placeholder { color: var(--text-dim); }
+        .chat-api-key input:focus {
+            outline: none;
+            border-color: var(--gold);
+        }
+        .chat-api-key.hidden { display: none; }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .chat-message {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .chat-message.user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, var(--gold), #c9a82e);
+            color: var(--dark-bg);
+        }
+        .chat-message.assistant {
+            align-self: flex-start;
+            background: var(--dark-secondary);
+            color: var(--text-primary);
+        }
+        .chat-message.error {
+            align-self: flex-start;
+            background: rgba(245, 101, 101, 0.2);
+            color: var(--red);
+            border: 1px solid rgba(245, 101, 101, 0.3);
+        }
+        .chat-message pre {
+            background: var(--dark-bg);
+            padding: 8px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 8px 0;
+            font-size: 12px;
+        }
+        .chat-message code {
+            font-family: 'Monaco', 'Consolas', monospace;
+        }
+        .chat-message table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 8px 0;
+            font-size: 12px;
+        }
+        .chat-message th, .chat-message td {
+            padding: 4px 8px;
+            border: 1px solid var(--border-subtle);
+            text-align: left;
+        }
+        .chat-message th { background: var(--dark-bg); }
+        .chat-input-area {
+            padding: 12px 16px;
+            background: var(--dark-secondary);
+            border-top: 1px solid var(--border-subtle);
+            display: flex;
+            gap: 8px;
+        }
+        .chat-input-area input {
+            flex: 1;
+            padding: 10px 14px;
+            background: var(--dark-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 20px;
+            color: var(--text-primary);
+            font-size: 14px;
+            font-family: inherit;
+        }
+        .chat-input-area input:focus {
+            outline: none;
+            border-color: var(--gold);
+        }
+        .chat-input-area button {
+            padding: 10px 16px;
+            background: linear-gradient(135deg, var(--gold), #c9a82e);
+            border: none;
+            border-radius: 20px;
+            color: var(--dark-bg);
+            font-weight: 600;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 13px;
+        }
+        .chat-input-area button:hover { opacity: 0.9; }
+        .chat-input-area button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .chat-typing {
+            display: flex;
+            gap: 4px;
+            padding: 10px 14px;
+            align-self: flex-start;
+            background: var(--dark-secondary);
+            border-radius: 12px;
+        }
+        .chat-typing span {
+            width: 8px;
+            height: 8px;
+            background: var(--text-dim);
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+        .chat-typing span:nth-child(2) { animation-delay: 0.2s; }
+        .chat-typing span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); }
+            30% { transform: translateY(-4px); }
+        }
     </style>
 </head>
 <body>
@@ -3278,6 +3641,360 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         // Initialize map when page loads
         if (typeof maplibregl !== 'undefined') {
             MapViewer.init();
+        }
+
+        // ==================== Geo Chat Assistant ====================
+        var GeoChat = {
+            apiKey: null,
+            context: null,
+            messages: [],
+
+            init: function() {
+                var self = this;
+
+                var chatToggle = document.getElementById('chatToggle');
+                var chatWindow = document.getElementById('chatWindow');
+                var chatClose = document.getElementById('chatClose');
+                var apiKeyInput = document.getElementById('apiKeyInput');
+                var chatApiKey = document.getElementById('chatApiKey');
+                var chatSend = document.getElementById('chatSend');
+                var chatInput = document.getElementById('chatInput');
+
+                // Check all elements exist
+                if (!chatToggle || !chatWindow || !chatClose || !apiKeyInput || !chatApiKey || !chatSend || !chatInput) {
+                    console.error('GeoChat: Missing DOM elements');
+                    return;
+                }
+
+                // Load saved API key
+                this.apiKey = localStorage.getItem('claude_api_key');
+                if (this.apiKey) {
+                    chatApiKey.classList.add('hidden');
+                }
+
+                // Event listeners
+                chatToggle.addEventListener('click', function() {
+                    chatWindow.classList.toggle('open');
+                    if (!self.context) self.loadContext();
+                });
+
+                chatClose.addEventListener('click', function() {
+                    chatWindow.classList.remove('open');
+                });
+
+                apiKeyInput.addEventListener('change', function(e) {
+                    self.apiKey = e.target.value;
+                    localStorage.setItem('claude_api_key', self.apiKey);
+                    chatApiKey.classList.add('hidden');
+                });
+
+                chatSend.addEventListener('click', function() {
+                    self.sendMessage();
+                });
+
+                chatInput.addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter') self.sendMessage();
+                });
+
+                console.log('GeoChat initialized');
+            },
+
+            loadContext: function() {
+                var self = this;
+                fetch('/api/chat/context')
+                    .then(function(r) { return r.json(); })
+                    .then(function(data) {
+                        if (data.error) {
+                            self.addMessage('error', 'Failed to load database context: ' + data.error);
+                        } else {
+                            self.context = data;
+                        }
+                    })
+                    .catch(function(err) {
+                        self.addMessage('error', 'Failed to connect to server');
+                    });
+            },
+
+            buildSystemPrompt: function() {
+                if (!this.context) return '';
+
+                var prompt = 'You are a geodata assistant for Swedish Lantmateriet data in PostGIS.\\n';
+                prompt += 'Schema: ' + this.context.metadata.schema_name + ', SRID: 3006 (SWEREF99 TM)\\n\\n';
+
+                prompt += 'TABLES:\\n';
+                var tableCount = 0;
+                for (var table in this.context.schema) {
+                    if (tableCount >= 10) {
+                        prompt += '... and ' + (Object.keys(this.context.schema).length - 10) + ' more tables\\n';
+                        break;
+                    }
+                    var info = this.context.schema[table];
+                    var shortName = table.split('.')[1];
+                    prompt += shortName + ' (' + info.row_count + ' rows';
+                    if (info.geometry_type) {
+                        prompt += ', ' + info.geometry_type;
+                    }
+                    prompt += '): ';
+                    // Only first 8 column names
+                    var colNames = info.columns.slice(0, 8).map(function(c) { return c.name; });
+                    prompt += colNames.join(', ');
+                    if (info.columns.length > 8) prompt += '...';
+                    prompt += '\\n';
+                    tableCount++;
+                }
+
+                prompt += '\\nRULES:\\n';
+                prompt += '- Generate exactly ONE valid PostgreSQL/PostGIS SELECT query in a ```sql block\\n';
+                prompt += '- Always use full table names: "' + this.context.metadata.schema_name + '"."tablename"\\n';
+                prompt += '- Use ST_* functions for spatial queries\\n';
+                prompt += '- Keep queries simple - no dynamic SQL, no variables, no comments inside SQL\\n';
+                prompt += '- Only ONE query per response - never multiple queries\\n';
+
+                return prompt;
+            },
+
+            addMessage: function(role, content) {
+                var container = document.getElementById('chatMessages');
+                var div = document.createElement('div');
+                div.className = 'chat-message ' + role;
+
+                // Format message content safely
+                var formatted = this.formatMessage(content);
+                div.appendChild(formatted);
+
+                container.appendChild(div);
+                container.scrollTop = container.scrollHeight;
+
+                if (role !== 'error') {
+                    this.messages.push({ role: role, content: content });
+                }
+            },
+
+            formatMessage: function(text) {
+                // Create a document fragment for safe DOM construction
+                var fragment = document.createDocumentFragment();
+                var parts = text.split(/(```[\\s\\S]*?```)/g);
+
+                parts.forEach(function(part) {
+                    if (part.startsWith('```') && part.endsWith('```')) {
+                        // Code block
+                        var code = part.slice(3, -3);
+                        // Remove language identifier if present
+                        var lines = code.split('\\n');
+                        if (lines[0] && !lines[0].includes(' ')) {
+                            lines.shift();
+                        }
+                        var pre = document.createElement('pre');
+                        var codeEl = document.createElement('code');
+                        codeEl.textContent = lines.join('\\n').trim();
+                        pre.appendChild(codeEl);
+                        fragment.appendChild(pre);
+                    } else if (part.trim()) {
+                        // Regular text - handle inline code and newlines
+                        var textParts = part.split(/(`[^`]+`)/g);
+                        textParts.forEach(function(textPart) {
+                            if (textPart.startsWith('`') && textPart.endsWith('`')) {
+                                var inlineCode = document.createElement('code');
+                                inlineCode.textContent = textPart.slice(1, -1);
+                                fragment.appendChild(inlineCode);
+                            } else if (textPart) {
+                                // Handle newlines
+                                var lines = textPart.split('\\n');
+                                lines.forEach(function(line, index) {
+                                    if (line) {
+                                        fragment.appendChild(document.createTextNode(line));
+                                    }
+                                    if (index < lines.length - 1) {
+                                        fragment.appendChild(document.createElement('br'));
+                                    }
+                                });
+                            }
+                        });
+                    }
+                });
+
+                return fragment;
+            },
+
+            showTyping: function() {
+                var container = document.getElementById('chatMessages');
+                var div = document.createElement('div');
+                div.className = 'chat-message assistant chat-typing';
+                div.id = 'typingIndicator';
+
+                for (var i = 0; i < 3; i++) {
+                    var span = document.createElement('span');
+                    div.appendChild(span);
+                }
+
+                container.appendChild(div);
+                container.scrollTop = container.scrollHeight;
+            },
+
+            hideTyping: function() {
+                var el = document.getElementById('typingIndicator');
+                if (el) el.remove();
+            },
+
+            sendMessage: async function() {
+                var input = document.getElementById('chatInput');
+                var text = input.value.trim();
+                if (!text) return;
+
+                if (!this.apiKey) {
+                    this.addMessage('error', 'Please enter your Claude API key first');
+                    return;
+                }
+
+                if (!this.context) {
+                    this.addMessage('error', 'Database context not loaded. Please wait...');
+                    this.loadContext();
+                    return;
+                }
+
+                this.addMessage('user', text);
+                input.value = '';
+
+                var sendBtn = document.getElementById('chatSend');
+                sendBtn.disabled = true;
+
+                this.showTyping();
+
+                try {
+                    var response = await this.callClaude(text);
+                    this.hideTyping();
+
+                    var sqlMatch = response.match(/```sql\\n([\\s\\S]*?)```/);
+                    if (sqlMatch) {
+                        this.addMessage('assistant', response);
+
+                        var sql = sqlMatch[1].trim();
+                        var results = await this.executeSQL(sql);
+
+                        if (results.error) {
+                            this.addMessage('error', 'SQL Error: ' + results.error);
+                        } else {
+                            var resultText = this.formatResults(results);
+                            this.addMessage('assistant', resultText);
+
+                            this.showTyping();
+                            var summary = await this.callClaude('Here are the SQL results:\\n' + resultText + '\\n\\nPlease summarize these results for the user.');
+                            this.hideTyping();
+                            this.addMessage('assistant', summary);
+                        }
+                    } else {
+                        this.addMessage('assistant', response);
+                    }
+                } catch (err) {
+                    this.hideTyping();
+                    this.addMessage('error', 'Error: ' + err.message);
+                }
+
+                sendBtn.disabled = false;
+            },
+
+            callClaude: async function(userMessage) {
+                var messages = [];
+                var history = this.messages.slice(-10);
+                if (history.length > 0) {
+                    messages = history.map(function(m) {
+                        return { role: m.role === 'user' ? 'user' : 'assistant', content: m.content };
+                    });
+                }
+                messages.push({ role: 'user', content: userMessage });
+
+                var response = await fetch('https://api.anthropic.com/v1/messages', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-api-key': this.apiKey,
+                        'anthropic-version': '2023-06-01',
+                        'anthropic-dangerous-direct-browser-access': 'true'
+                    },
+                    body: JSON.stringify({
+                        model: 'claude-3-5-haiku-20241022',
+                        max_tokens: 1024,
+                        system: this.buildSystemPrompt(),
+                        messages: messages
+                    })
+                });
+
+                if (!response.ok) {
+                    var error = await response.json();
+                    throw new Error(error.error?.message || 'API request failed');
+                }
+
+                var data = await response.json();
+                return data.content[0].text;
+            },
+
+            executeSQL: async function(sql) {
+                var response = await fetch('/api/chat/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sql: sql })
+                });
+                return response.json();
+            },
+
+            formatResults: function(results) {
+                if (!results.results || results.results.length === 0) {
+                    return 'Query returned no results.';
+                }
+
+                var text = 'Results (' + results.row_count + ' rows, ' + results.execution_time_ms + 'ms):\\n\\n';
+                var cols = results.columns;
+                text += '| ' + cols.join(' | ') + ' |\\n';
+                text += '| ' + cols.map(function() { return '---'; }).join(' | ') + ' |\\n';
+
+                results.results.slice(0, 20).forEach(function(row) {
+                    var vals = cols.map(function(c) {
+                        var v = row[c];
+                        if (v === null) return 'NULL';
+                        if (typeof v === 'object') return JSON.stringify(v);
+                        return String(v).substring(0, 50);
+                    });
+                    text += '| ' + vals.join(' | ') + ' |\\n';
+                });
+
+                if (results.truncated) {
+                    text += '\\n(Results truncated to 1000 rows)';
+                }
+
+                return text;
+            }
+        };
+
+    </script>
+
+    <!-- Chat Widget -->
+    <button class="chat-toggle" id="chatToggle" title="Geo Assistant">
+        <svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+    </button>
+    <div class="chat-window" id="chatWindow">
+        <div class="chat-header">
+            <h3>Geo Assistant</h3>
+            <button class="chat-close" id="chatClose">&times;</button>
+        </div>
+        <div class="chat-api-key" id="chatApiKey">
+            <input type="password" id="apiKeyInput" placeholder="Enter your Claude API key...">
+        </div>
+        <div class="chat-messages" id="chatMessages"></div>
+        <div class="chat-input-area">
+            <input type="text" id="chatInput" placeholder="Ask about your geodata...">
+            <button id="chatSend">Send</button>
+        </div>
+    </div>
+    <script>
+        // Initialize chat after DOM elements exist
+        console.log('Initializing GeoChat...');
+        console.log('chatToggle element:', document.getElementById('chatToggle'));
+        console.log('chatWindow element:', document.getElementById('chatWindow'));
+        try {
+            GeoChat.init();
+            console.log('GeoChat initialized successfully');
+        } catch (e) {
+            console.error('GeoChat init error:', e);
         }
     </script>
 </body>
