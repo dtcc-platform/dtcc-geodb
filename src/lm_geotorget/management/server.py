@@ -455,6 +455,142 @@ def create_management_app(
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
+    # ==================== Layers API ====================
+
+    @app.route('/api/layers')
+    def list_layers_api():
+        """List all available layers."""
+        if not app.config['db_connection']:
+            return jsonify([])
+
+        try:
+            import psycopg2
+
+            with psycopg2.connect(app.config['db_connection']) as conn:
+                with conn.cursor() as cur:
+                    schema = app.config['schema']
+                    # Get all geometry tables
+                    cur.execute("""
+                        SELECT f_table_name
+                        FROM geometry_columns
+                        WHERE f_table_schema = %s
+                        AND f_table_name NOT LIKE '\\_%%'
+                        ORDER BY f_table_name
+                    """, (schema,))
+                    return jsonify([row[0] for row in cur.fetchall()])
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/layers/<layer_name>')
+    def get_layer_info_api(layer_name: str):
+        """Get detailed information about a layer."""
+        if not app.config['db_connection']:
+            return jsonify({'error': 'Database not configured'}), 400
+
+        try:
+            import psycopg2
+
+            with psycopg2.connect(app.config['db_connection']) as conn:
+                with conn.cursor() as cur:
+                    schema = app.config['schema']
+
+                    # Get geometry info
+                    cur.execute("""
+                        SELECT type, srid
+                        FROM geometry_columns
+                        WHERE f_table_schema = %s AND f_table_name = %s
+                    """, (schema, layer_name))
+                    row = cur.fetchone()
+                    if not row:
+                        return jsonify({'error': 'Layer not found'}), 404
+
+                    geom_type = row[0]
+                    srid = row[1] if len(row) > 1 else 0
+
+                    # Get count
+                    cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{layer_name}"')
+                    count_row = cur.fetchone()
+                    count = count_row[0] if count_row else 0
+
+                    # Get source order
+                    cur.execute(f'SELECT _source_order FROM "{schema}"."{layer_name}" LIMIT 1')
+                    source_row = cur.fetchone()
+                    source_order = source_row[0] if source_row else None
+
+                    return jsonify({
+                        'name': layer_name,
+                        'geometry_type': geom_type,
+                        'srid': srid,
+                        'feature_count': count,
+                        'source_order': source_order
+                    })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    @app.route('/api/layers/<layer_name>/features')
+    def get_layer_features_api(layer_name: str):
+        """Query features from a layer."""
+        if not app.config['db_connection']:
+            return jsonify({'error': 'Database not configured'}), 400
+
+        bbox = request.args.get('bbox')
+        limit = min(int(request.args.get('limit', 1000)), 10000)
+
+        try:
+            import psycopg2
+            import psycopg2.extras
+
+            with psycopg2.connect(app.config['db_connection']) as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    schema = app.config['schema']
+
+                    # Build query
+                    where_clause = ""
+                    params = []
+
+                    if bbox:
+                        bbox_parts = [float(x) for x in bbox.split(',')]
+                        if len(bbox_parts) == 4:
+                            where_clause = """
+                                WHERE ST_Intersects(
+                                    geom,
+                                    ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                                )
+                            """
+                            params = bbox_parts
+
+                    query = f"""
+                        SELECT
+                            fid,
+                            ST_AsGeoJSON(ST_Transform(geom, 4326))::json as geometry,
+                            *
+                        FROM "{schema}"."{layer_name}"
+                        {where_clause}
+                        LIMIT %s
+                    """
+                    params.append(limit)
+
+                    cur.execute(query, params)
+                    rows = cur.fetchall()
+
+                    # Build GeoJSON
+                    features = []
+                    for row in rows:
+                        properties = {k: v for k, v in row.items()
+                                    if k not in ('fid', 'geom', 'geometry', '_source_order', '_loaded_at')}
+                        features.append({
+                            'type': 'Feature',
+                            'geometry': row['geometry'],
+                            'properties': properties
+                        })
+
+                    return jsonify({
+                        'type': 'FeatureCollection',
+                        'features': features
+                    })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
     return app
 
 
@@ -956,6 +1092,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Geotorget Management</title>
+    <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;600;700&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1733,6 +1871,133 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             border: 1px solid var(--border-subtle);
             transform: none;
         }
+
+        /* Split View Layout */
+        .split-view {
+            display: flex;
+            gap: 1.5rem;
+            margin-top: 1rem;
+        }
+        .split-left {
+            flex: 0 0 40%;
+            min-width: 0;
+        }
+        .split-right {
+            flex: 0 0 60%;
+            min-width: 0;
+            position: sticky;
+            top: calc(56px + 2rem);
+            height: calc(100vh - 56px - 4rem);
+        }
+
+        /* Map Container */
+        #maplibre-map {
+            width: 100%;
+            height: 100%;
+            border-radius: 8px;
+            border: 1px solid var(--border-subtle);
+            background: var(--dark-bg);
+        }
+
+        /* Layer Toggles */
+        .layer-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.4rem 0.5rem;
+            margin: 0.25rem 0;
+            background: var(--dark-bg);
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .layer-toggle:hover {
+            background: var(--gold-subtle);
+        }
+        .layer-toggle input[type="checkbox"] {
+            cursor: pointer;
+        }
+        .layer-toggle-label {
+            flex: 1;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .layer-color-swatch {
+            width: 14px;
+            height: 14px;
+            border-radius: 2px;
+            border: 1px solid var(--border-subtle);
+        }
+        .layer-loading {
+            font-size: 0.65rem;
+            color: var(--text-dim);
+            font-style: italic;
+        }
+
+        /* MapLibre Popup Styling */
+        .maplibregl-popup-content {
+            background: var(--dark-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 4px;
+            padding: 0.75rem;
+            font-family: 'Montserrat', sans-serif;
+            font-size: 0.75rem;
+            max-width: 300px;
+        }
+        .maplibregl-popup-close-button {
+            color: var(--text-secondary);
+            font-size: 1.2rem;
+            padding: 0.25rem 0.5rem;
+        }
+        .maplibregl-popup-close-button:hover {
+            background: var(--gold-subtle);
+            color: var(--gold);
+        }
+        .maplibregl-popup-anchor-top .maplibregl-popup-tip,
+        .maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+        .maplibregl-popup-anchor-left .maplibregl-popup-tip,
+        .maplibregl-popup-anchor-right .maplibregl-popup-tip {
+            border-color: var(--dark-secondary);
+        }
+        .popup-property {
+            margin-bottom: 0.35rem;
+        }
+        .popup-property:last-child {
+            margin-bottom: 0;
+        }
+        .popup-property-key {
+            color: var(--text-dim);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.65rem;
+            letter-spacing: 0.04em;
+        }
+        .popup-property-value {
+            color: var(--text-primary);
+            font-family: 'Monaco', 'Consolas', monospace;
+            word-break: break-word;
+        }
+
+        /* Responsive: stack on narrow screens */
+        @media (max-width: 1024px) {
+            .split-view {
+                flex-direction: column;
+            }
+            .split-left, .split-right {
+                flex: 1;
+                width: 100%;
+            }
+            .split-right {
+                position: relative;
+                top: 0;
+                height: 500px;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1796,8 +2061,15 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         </div>
 
         <h2 class="section-header">Downloaded Orders</h2>
-        <div class="orders-grid" id="ordersGrid">
-            <div class="empty-state">Loading orders...</div>
+        <div class="split-view">
+            <div class="split-left">
+                <div class="orders-grid" id="ordersGrid">
+                    <div class="empty-state">Loading orders...</div>
+                </div>
+            </div>
+            <div class="split-right">
+                <div id="maplibre-map"></div>
+            </div>
         </div>
 
         <div class="footer">
@@ -2204,6 +2476,13 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     });
 
                     grid.replaceChildren(fragment);
+
+                    // Re-render layer toggles if MapViewer is initialized
+                    if (typeof MapViewer !== 'undefined' && MapViewer.map) {
+                        setTimeout(function() {
+                            MapViewer.renderLayerToggles();
+                        }, 100);
+                    }
                 })
                 .catch(function(e) {
                     console.error('Failed to load orders:', e);
@@ -2603,6 +2882,402 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             checkDbStatus();
             loadOrders();
         }, 30000);
+
+        // MapViewer - MapLibre GL JS integration
+        var MapViewer = {
+            map: null,
+            layers: {},
+            reloadDebounceTimer: null,
+
+            // Initialize the map
+            init: function() {
+                this.map = new maplibregl.Map({
+                    container: 'maplibre-map',
+                    style: {
+                        version: 8,
+                        sources: {
+                            'carto-dark': {
+                                type: 'raster',
+                                tiles: [
+                                    'https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+                                    'https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png',
+                                    'https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png'
+                                ],
+                                tileSize: 256,
+                                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                            }
+                        },
+                        layers: [{
+                            id: 'carto-dark',
+                            type: 'raster',
+                            source: 'carto-dark'
+                        }],
+                        glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf'
+                    },
+                    center: [17, 62],
+                    zoom: 4
+                });
+
+                this.map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+                // Event handlers
+                var self = this;
+                this.map.on('moveend', function() { self.reloadVisibleLayers(); });
+                this.map.on('click', function(e) { self.handleMapClick(e); });
+                this.map.on('mousemove', function(e) { self.handleMouseMove(e); });
+
+                // Discover layers after map loads
+                this.map.on('load', function() {
+                    self.discoverLayers();
+                });
+            },
+
+            // Generate color from string hash
+            hashColor: function(str) {
+                var hash = 0;
+                for (var i = 0; i < str.length; i++) {
+                    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+                }
+                var hue = hash % 360;
+                return 'hsl(' + hue + ', 70%, 60%)';
+            },
+
+            // Discover available layers from API
+            discoverLayers: function() {
+                var self = this;
+                fetch('/api/layers')
+                    .then(function(resp) { return resp.json(); })
+                    .then(function(layers) {
+                        var promises = layers.map(function(layerName) {
+                            return fetch('/api/layers/' + layerName)
+                                .then(function(r) { return r.json(); })
+                                .then(function(info) {
+                                    self.layers[layerName] = {
+                                        name: layerName,
+                                        source_order: info.source_order,
+                                        geometry_type: info.geometry_type,
+                                        feature_count: info.feature_count,
+                                        color: self.hashColor(layerName),
+                                        visible: false,
+                                        loading: false
+                                    };
+                                });
+                        });
+                        return Promise.all(promises);
+                    })
+                    .then(function() {
+                        self.updateLayerToggles();
+                    })
+                    .catch(function(e) {
+                        console.error('Failed to discover layers:', e);
+                    });
+            },
+
+            // Update layer toggles in order cards
+            updateLayerToggles: function() {
+                var self = this;
+                // Restore from localStorage
+                var savedState = localStorage.getItem('mapLayerState');
+                if (savedState) {
+                    try {
+                        var state = JSON.parse(savedState);
+                        Object.keys(state).forEach(function(layerName) {
+                            if (self.layers[layerName]) {
+                                self.layers[layerName].visible = state[layerName];
+                            }
+                        });
+                    } catch(e) {}
+                }
+
+                this.renderLayerToggles();
+
+                // Restore visible layers on map
+                Object.keys(this.layers).forEach(function(layerName) {
+                    if (self.layers[layerName].visible) {
+                        self.loadLayerFeatures(layerName);
+                    }
+                });
+            },
+
+            // Render layer toggles in order cards
+            renderLayerToggles: function() {
+                var self = this;
+
+                // Find all layer items and add checkboxes to those that match published layers
+                var layerItems = document.querySelectorAll('.layer-item.published');
+                layerItems.forEach(function(item) {
+                    // Extract layer name from text (format is "✓ layername")
+                    var text = item.textContent.trim();
+                    var layerName = text.replace(/^[\u2713\u25CB]\s*/, ''); // Remove checkmark or circle prefix
+
+                    var layer = self.layers[layerName];
+                    if (!layer) return;
+
+                    // Check if already has checkbox
+                    if (item.querySelector('input[type="checkbox"]')) return;
+
+                    // Clear existing content and rebuild with checkbox
+                    item.textContent = '';
+                    item.style.display = 'flex';
+                    item.style.alignItems = 'center';
+                    item.style.gap = '8px';
+                    item.style.cursor = 'pointer';
+
+                    var checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = layer.visible;
+                    checkbox.style.cursor = 'pointer';
+                    checkbox.dataset.layer = layerName;
+                    checkbox.addEventListener('change', function(e) {
+                        e.stopPropagation();
+                        self.toggleLayer(layerName, checkbox.checked);
+                    });
+
+                    var swatch = document.createElement('span');
+                    swatch.className = 'layer-color-swatch';
+                    swatch.style.backgroundColor = layer.color;
+                    swatch.style.width = '12px';
+                    swatch.style.height = '12px';
+                    swatch.style.borderRadius = '2px';
+                    swatch.style.display = 'inline-block';
+                    swatch.style.flexShrink = '0';
+
+                    var label = document.createElement('span');
+                    label.textContent = layerName;
+                    label.style.flex = '1';
+
+                    item.appendChild(checkbox);
+                    item.appendChild(swatch);
+                    item.appendChild(label);
+
+                    // Make entire row clickable
+                    item.addEventListener('click', function(e) {
+                        if (e.target !== checkbox) {
+                            checkbox.checked = !checkbox.checked;
+                            self.toggleLayer(layerName, checkbox.checked);
+                        }
+                    });
+                });
+            },
+
+            // Toggle layer visibility
+            toggleLayer: function(layerName, visible) {
+                if (!this.layers[layerName]) return;
+
+                this.layers[layerName].visible = visible;
+                this.saveLayerState();
+
+                if (visible) {
+                    this.loadLayerFeatures(layerName);
+                } else {
+                    this.removeLayerFromMap(layerName);
+                }
+            },
+
+            // Load layer features from API
+            loadLayerFeatures: function(layerName) {
+                var self = this;
+                var layer = this.layers[layerName];
+                if (!layer) return;
+
+                layer.loading = true;
+                this.updateLoadingState(layerName, true);
+
+                var bounds = this.map.getBounds();
+                var bbox = [
+                    bounds.getWest(),
+                    bounds.getSouth(),
+                    bounds.getEast(),
+                    bounds.getNorth()
+                ].join(',');
+
+                fetch('/api/layers/' + layerName + '/features?bbox=' + bbox + '&limit=5000')
+                    .then(function(resp) { return resp.json(); })
+                    .then(function(geojson) {
+                        layer.loading = false;
+                        self.updateLoadingState(layerName, false);
+                        self.addLayerToMap(layerName, geojson);
+                    })
+                    .catch(function(e) {
+                        console.error('Failed to load layer features:', e);
+                        layer.loading = false;
+                        self.updateLoadingState(layerName, false);
+                    });
+            },
+
+            // Update loading state in UI
+            updateLoadingState: function(layerName, loading) {
+                var toggle = document.querySelector('[data-layer="' + layerName + '"]');
+                if (!toggle) return;
+
+                var existingLoading = toggle.querySelector('.layer-loading');
+                if (loading && !existingLoading) {
+                    var loadingSpan = document.createElement('span');
+                    loadingSpan.className = 'layer-loading';
+                    loadingSpan.textContent = 'Loading...';
+                    toggle.appendChild(loadingSpan);
+                } else if (!loading && existingLoading) {
+                    existingLoading.remove();
+                }
+            },
+
+            // Add layer to map
+            addLayerToMap: function(layerName, geojson) {
+                var layer = this.layers[layerName];
+                if (!layer) return;
+
+                var sourceId = 'layer-' + layerName;
+                var layerId = 'layer-' + layerName;
+
+                // Remove existing layer/source if present
+                if (this.map.getLayer(layerId)) {
+                    this.map.removeLayer(layerId);
+                }
+                if (this.map.getSource(sourceId)) {
+                    this.map.removeSource(sourceId);
+                }
+
+                // Add source
+                this.map.addSource(sourceId, {
+                    type: 'geojson',
+                    data: geojson
+                });
+
+                // Add layer based on geometry type
+                var geometryType = layer.geometry_type.toLowerCase();
+                var layerConfig = {
+                    id: layerId,
+                    source: sourceId
+                };
+
+                if (geometryType.indexOf('point') !== -1) {
+                    layerConfig.type = 'circle';
+                    layerConfig.paint = {
+                        'circle-radius': 5,
+                        'circle-color': layer.color,
+                        'circle-stroke-width': 1,
+                        'circle-stroke-color': '#ffffff'
+                    };
+                } else if (geometryType.indexOf('line') !== -1) {
+                    layerConfig.type = 'line';
+                    layerConfig.paint = {
+                        'line-color': layer.color,
+                        'line-width': 2
+                    };
+                } else if (geometryType.indexOf('polygon') !== -1) {
+                    // Add fill
+                    var fillLayerId = layerId + '-fill';
+                    this.map.addLayer({
+                        id: fillLayerId,
+                        type: 'fill',
+                        source: sourceId,
+                        paint: {
+                            'fill-color': layer.color,
+                            'fill-opacity': 0.3
+                        }
+                    });
+                    // Add outline
+                    layerConfig.type = 'line';
+                    layerConfig.paint = {
+                        'line-color': layer.color,
+                        'line-width': 2
+                    };
+                } else {
+                    // Default to circle
+                    layerConfig.type = 'circle';
+                    layerConfig.paint = {
+                        'circle-radius': 5,
+                        'circle-color': layer.color
+                    };
+                }
+
+                this.map.addLayer(layerConfig);
+            },
+
+            // Remove layer from map
+            removeLayerFromMap: function(layerName) {
+                var layerId = 'layer-' + layerName;
+                var fillLayerId = layerId + '-fill';
+                var sourceId = 'layer-' + layerName;
+
+                if (this.map.getLayer(fillLayerId)) {
+                    this.map.removeLayer(fillLayerId);
+                }
+                if (this.map.getLayer(layerId)) {
+                    this.map.removeLayer(layerId);
+                }
+                if (this.map.getSource(sourceId)) {
+                    this.map.removeSource(sourceId);
+                }
+            },
+
+            // Reload visible layers (debounced)
+            reloadVisibleLayers: function() {
+                var self = this;
+                if (this.reloadDebounceTimer) {
+                    clearTimeout(this.reloadDebounceTimer);
+                }
+                this.reloadDebounceTimer = setTimeout(function() {
+                    Object.keys(self.layers).forEach(function(layerName) {
+                        if (self.layers[layerName].visible) {
+                            self.loadLayerFeatures(layerName);
+                        }
+                    });
+                }, 500);
+            },
+
+            // Handle map click - show popup
+            handleMapClick: function(e) {
+                var self = this;
+                var features = this.map.queryRenderedFeatures(e.point);
+                if (features.length === 0) return;
+
+                var feature = features[0];
+                var popupContent = document.createElement('div');
+
+                Object.keys(feature.properties).forEach(function(key) {
+                    var prop = document.createElement('div');
+                    prop.className = 'popup-property';
+
+                    var keyElem = document.createElement('div');
+                    keyElem.className = 'popup-property-key';
+                    keyElem.textContent = key;
+
+                    var valueElem = document.createElement('div');
+                    valueElem.className = 'popup-property-value';
+                    valueElem.textContent = feature.properties[key];
+
+                    prop.appendChild(keyElem);
+                    prop.appendChild(valueElem);
+                    popupContent.appendChild(prop);
+                });
+
+                new maplibregl.Popup()
+                    .setLngLat(e.lngLat)
+                    .setDOMContent(popupContent)
+                    .addTo(this.map);
+            },
+
+            // Handle mouse move - change cursor
+            handleMouseMove: function(e) {
+                var features = this.map.queryRenderedFeatures(e.point);
+                this.map.getCanvas().style.cursor = features.length > 0 ? 'pointer' : '';
+            },
+
+            // Save layer state to localStorage
+            saveLayerState: function() {
+                var state = {};
+                Object.keys(this.layers).forEach(function(layerName) {
+                    state[layerName] = this.layers[layerName].visible;
+                }, this);
+                localStorage.setItem('mapLayerState', JSON.stringify(state));
+            }
+        };
+
+        // Initialize map when page loads
+        if (typeof maplibregl !== 'undefined') {
+            MapViewer.init();
+        }
     </script>
 </body>
 </html>'''
