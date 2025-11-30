@@ -455,7 +455,7 @@ def get_order_info(order_dir: Path) -> dict:
     """
     detected = detect_order_type(order_dir)
 
-    return {
+    result = {
         "order_id": detected.order_id,
         "data_type": detected.data_type.value,
         "data_type_label": _get_type_label(detected.data_type),
@@ -467,14 +467,111 @@ def get_order_info(order_dir: Path) -> dict:
         "metadata": detected.metadata,
     }
 
+    # Add LiDAR tile count for on-demand orders
+    if detected.lidar_tiles:
+        result["file_count"] = len(detected.lidar_tiles)
+        result["lidar_tile_count"] = len(detected.lidar_tiles)
+
+    return result
+
 
 def _get_type_label(data_type: DataType) -> str:
     """Get human-readable label for data type."""
     labels = {
         DataType.VECTOR_GPKG: "Vector (GeoPackage)",
         DataType.LIDAR_LAZ: "LiDAR (LAZ)",
+        DataType.LIDAR_INDEX: "LiDAR (On-Demand)",
         DataType.RASTER_DEM: "Raster (DEM)",
         DataType.RASTER_ORTHO: "Raster (Orthophoto)",
         DataType.UNKNOWN: "Unknown",
     }
     return labels.get(data_type, "Unknown")
+
+
+def get_lidar_tiles(order_dir: Path) -> list[dict]:
+    """
+    Get LiDAR tiles for an on-demand order.
+
+    Args:
+        order_dir: Path to the order directory
+
+    Returns:
+        List of tile dicts with filename, coordinates, size, and download URL
+    """
+    detected = detect_order_type(order_dir)
+
+    if detected.data_type != DataType.LIDAR_INDEX:
+        return []
+
+    tiles = []
+    for tile in detected.lidar_tiles:
+        # Convert grid to SWEREF99 TM meters for bounding box
+        # grid_x is easting in km (e.g., 650 = 650,000 m)
+        # grid_y is northing encoded as two digits (e.g., 60 = 6,600,000 m)
+        # The northing has implicit leading "6" and is in 10km units
+        min_x = tile.grid_x * 1000  # km to m
+        min_y = 6000000 + tile.grid_y * 10000  # Convert to full northing
+        max_x = min_x + 2500  # 2.5km tiles
+        max_y = min_y + 2500
+
+        tiles.append({
+            "filename": tile.filename,
+            "href": tile.href,
+            "size": tile.size,
+            "size_mb": round(tile.size / (1024 * 1024), 2),
+            "grid_x": tile.grid_x,
+            "grid_y": tile.grid_y,
+            "bbox_sweref": [min_x, min_y, max_x, max_y],
+        })
+
+    return tiles
+
+
+def get_lidar_tiles_geojson(order_dir: Path) -> dict:
+    """
+    Get LiDAR tiles as GeoJSON for map display.
+
+    Args:
+        order_dir: Path to the order directory
+
+    Returns:
+        GeoJSON FeatureCollection with tile polygons
+    """
+    from pyproj import Transformer
+
+    tiles = get_lidar_tiles(order_dir)
+    if not tiles:
+        return {"type": "FeatureCollection", "features": []}
+
+    # Transform from SWEREF99 TM (EPSG:3006) to WGS84 (EPSG:4326)
+    transformer = Transformer.from_crs("EPSG:3006", "EPSG:4326", always_xy=True)
+
+    features = []
+    for tile in tiles:
+        min_x, min_y, max_x, max_y = tile["bbox_sweref"]
+
+        # Transform corners to WGS84
+        lon1, lat1 = transformer.transform(min_x, min_y)
+        lon2, lat2 = transformer.transform(max_x, max_y)
+
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "filename": tile["filename"],
+                "size_mb": tile["size_mb"],
+                "grid_x": tile["grid_x"],
+                "grid_y": tile["grid_y"],
+            },
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[
+                    [lon1, lat1],
+                    [lon2, lat1],
+                    [lon2, lat2],
+                    [lon1, lat2],
+                    [lon1, lat1],
+                ]]
+            }
+        })
+
+    return {"type": "FeatureCollection", "features": features}

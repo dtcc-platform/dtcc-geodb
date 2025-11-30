@@ -377,6 +377,132 @@ def create_management_app(
             }
         )
 
+    # ==================== LiDAR Tiles (On-Demand) ====================
+
+    @app.route('/api/orders/<order_id>/lidar-tiles')
+    def get_lidar_tiles_api(order_id: str):
+        """Get LiDAR tiles for an on-demand order."""
+        from ..tiling.processor import get_lidar_tiles
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        tiles = get_lidar_tiles(order_dir)
+        return jsonify({
+            'order_id': order_id,
+            'tile_count': len(tiles),
+            'tiles': tiles
+        })
+
+    @app.route('/api/orders/<order_id>/lidar-tiles.geojson')
+    def get_lidar_tiles_geojson_api(order_id: str):
+        """Get LiDAR tiles as GeoJSON for map display."""
+        from ..tiling.processor import get_lidar_tiles_geojson
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        geojson = get_lidar_tiles_geojson(order_dir)
+        return jsonify(geojson)
+
+    @app.route('/api/orders/<order_id>/lidar-tiles/downloaded')
+    def get_downloaded_tiles(order_id: str):
+        """Get list of already downloaded LiDAR tiles."""
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        # Check for .laz files in the tiles subdirectory
+        tiles_dir = order_dir / 'tiles'
+        downloaded = []
+        if tiles_dir.exists():
+            downloaded = [f.name for f in tiles_dir.glob('*.laz')]
+
+        return jsonify({
+            'order_id': order_id,
+            'downloaded': downloaded,
+            'count': len(downloaded)
+        })
+
+    @app.route('/api/orders/<order_id>/lidar-tiles/<tile_name>/download', methods=['GET', 'POST'])
+    def download_lidar_tile(order_id: str, tile_name: str):
+        """
+        GET: Get info about a tile
+        POST: Start downloading a specific LiDAR tile to the server (with SSE progress)
+        """
+        from ..tiling.processor import get_lidar_tiles
+        import requests as req_lib
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        tiles = get_lidar_tiles(order_dir)
+        tile = next((t for t in tiles if t['filename'] == tile_name), None)
+
+        if not tile:
+            return jsonify({'error': 'Tile not found'}), 404
+
+        # GET request - just return tile info
+        if request.method == 'GET':
+            tiles_dir = order_dir / 'tiles'
+            is_downloaded = (tiles_dir / tile_name).exists() if tiles_dir.exists() else False
+            return jsonify({
+                'filename': tile['filename'],
+                'href': tile['href'],
+                'size_mb': tile['size_mb'],
+                'downloaded': is_downloaded
+            })
+
+        # POST request - download the tile with progress streaming
+        tiles_dir = order_dir / 'tiles'
+        tiles_dir.mkdir(exist_ok=True)
+        tile_path = tiles_dir / tile_name
+
+        # Check if already downloaded
+        if tile_path.exists():
+            return jsonify({
+                'status': 'already_downloaded',
+                'filename': tile_name,
+                'path': str(tile_path)
+            })
+
+        def generate_progress():
+            try:
+                response = req_lib.get(tile['href'], stream=True, timeout=300)
+                response.raise_for_status()
+
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                chunk_size = 65536  # 64KB chunks
+
+                with open(tile_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = int((downloaded / total_size) * 100)
+                            yield f"data: {json.dumps({'status': 'downloading', 'percent': percent, 'downloaded': downloaded, 'total': total_size})}\n\n"
+
+                yield f"data: {json.dumps({'status': 'downloaded', 'filename': tile_name, 'size_mb': tile['size_mb']})}\n\n"
+
+            except req_lib.RequestException as e:
+                # Clean up partial file
+                if tile_path.exists():
+                    tile_path.unlink()
+                yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
+
+        return Response(
+            stream_with_context(generate_progress()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no'
+            }
+        )
+
     # ==================== Database Status ====================
 
     @app.route('/api/db/status')
@@ -2515,6 +2641,87 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         .weather-popup .temp-cool { color: #68d391; }
         .weather-popup .temp-warm { color: #f6ad55; }
         .weather-popup .temp-hot { color: #fc8181; }
+
+        /* LiDAR Tiles */
+        .lidar-toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .lidar-toggle-row input[type="checkbox"] {
+            accent-color: var(--gold);
+        }
+        .lidar-toggle-row label {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+        }
+        .lidar-status {
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            margin-top: 0.25rem;
+        }
+        .lidar-popup {
+            font-family: 'Montserrat', sans-serif;
+            min-width: 200px;
+        }
+        .lidar-popup h4 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: #E91E63;
+            border-bottom: 1px solid var(--border-subtle);
+            padding-bottom: 6px;
+        }
+        .lidar-popup .lidar-grid {
+            display: grid;
+            grid-template-columns: auto auto;
+            gap: 4px 12px;
+            font-size: 12px;
+        }
+        .lidar-popup .lidar-label {
+            color: var(--text-secondary);
+        }
+        .lidar-popup .lidar-value {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+        .lidar-popup .download-btn {
+            display: block;
+            margin-top: 10px;
+            padding: 8px 16px;
+            background: #E91E63;
+            color: white;
+            text-align: center;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .lidar-popup .download-btn:hover {
+            background: #C2185B;
+        }
+        .lidar-progress {
+            margin-top: 10px;
+        }
+        .lidar-progress-bar {
+            width: 100%;
+            height: 8px;
+            background: var(--dark-card);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .lidar-progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #E91E63, #FF5722);
+            border-radius: 4px;
+            transition: width 0.2s ease;
+        }
+        .lidar-progress-text {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -2596,6 +2803,11 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     </div>
                     <button class="weather-refresh-btn" id="weatherRefreshBtn">↻ Refresh Weather</button>
                     <div class="weather-status" id="weatherStatus"></div>
+                    <div class="lidar-toggle-row" style="margin-top: 0.75rem;">
+                        <input type="checkbox" id="lidarToggle">
+                        <label for="lidarToggle">LiDAR Tiles</label>
+                    </div>
+                    <div class="lidar-status" id="lidarStatus"></div>
                 </div>
             </div>
             <div class="split-right">
@@ -3766,8 +3978,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
                 var feature = features[0];
 
-                // Skip if clicking on trains or weather layers (they have their own popups)
-                if (feature.layer && (feature.layer.id === 'trains-layer' || feature.layer.id === 'weather-layer')) {
+                // Skip if clicking on trains, weather, or lidar layers (they have their own popups)
+                if (feature.layer && (feature.layer.id === 'trains-layer' || feature.layer.id === 'weather-layer' || feature.layer.id === 'lidar-tiles-fill')) {
                     return;
                 }
                 var popupContent = document.createElement('div');
@@ -4295,6 +4507,366 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
         // Initialize weather viewer
         WeatherViewer.init();
+
+        // ==================== LiDAR Tile Viewer ====================
+        var LidarViewer = {
+            tiles: null,
+            orderId: null,
+            enabled: false,
+            handlersAdded: false,
+            downloadedTiles: {},
+            downloading: {},
+
+            init: function() {
+                var self = this;
+                var toggle = document.getElementById('lidarToggle');
+                var statusDiv = document.getElementById('lidarStatus');
+
+                if (!toggle) return;
+
+                toggle.addEventListener('change', function() {
+                    self.enabled = this.checked;
+                    if (self.enabled) {
+                        self.loadTiles();
+                    } else {
+                        self.removeTiles();
+                        if (statusDiv) statusDiv.textContent = '';
+                    }
+                });
+            },
+
+            loadTiles: function() {
+                var self = this;
+                var statusDiv = document.getElementById('lidarStatus');
+
+                // Find the first LiDAR on-demand order
+                fetch('/api/orders')
+                    .then(function(r) { return r.json(); })
+                    .then(function(orders) {
+                        var lidarOrder = orders.find(function(o) {
+                            return o.data_type === 'lidar_index';
+                        });
+
+                        if (!lidarOrder) {
+                            if (statusDiv) statusDiv.textContent = 'No LiDAR orders found';
+                            return;
+                        }
+
+                        self.orderId = lidarOrder.order_id;
+                        if (statusDiv) statusDiv.textContent = 'Loading tiles...';
+
+                        // Load both tiles and downloaded status
+                        return Promise.all([
+                            fetch('/api/orders/' + self.orderId + '/lidar-tiles.geojson').then(function(r) { return r.json(); }),
+                            fetch('/api/orders/' + self.orderId + '/lidar-tiles/downloaded').then(function(r) { return r.json(); })
+                        ]);
+                    })
+                    .then(function(results) {
+                        if (!results) return;
+                        var geojson = results[0];
+                        var downloaded = results[1];
+
+                        // Mark downloaded tiles
+                        self.downloadedTiles = {};
+                        if (downloaded && downloaded.downloaded) {
+                            downloaded.downloaded.forEach(function(name) {
+                                self.downloadedTiles[name] = true;
+                            });
+                        }
+
+                        // Add downloaded property to each feature
+                        geojson.features.forEach(function(f) {
+                            f.properties.downloaded = self.downloadedTiles[f.properties.filename] ? 1 : 0;
+                        });
+
+                        self.tiles = geojson;
+                        self.renderTiles();
+
+                        var downloadedCount = Object.keys(self.downloadedTiles).length;
+                        if (statusDiv) {
+                            statusDiv.textContent = geojson.features.length + ' tiles (' + downloadedCount + ' downloaded)';
+                        }
+                    })
+                    .catch(function(err) {
+                        console.error('Failed to load LiDAR tiles:', err);
+                        if (statusDiv) statusDiv.textContent = 'Error loading tiles';
+                    });
+            },
+
+            renderTiles: function() {
+                var self = this;
+                if (!MapViewer.map || !this.tiles) return;
+
+                var map = MapViewer.map;
+
+                // Remove existing layers first if re-rendering
+                if (map.getLayer('lidar-tiles-fill')) {
+                    map.removeLayer('lidar-tiles-fill');
+                }
+                if (map.getLayer('lidar-tiles-outline')) {
+                    map.removeLayer('lidar-tiles-outline');
+                }
+                if (map.getSource('lidar-tiles')) {
+                    map.removeSource('lidar-tiles');
+                }
+
+                // Add source
+                map.addSource('lidar-tiles', {
+                    type: 'geojson',
+                    data: this.tiles
+                });
+
+                // Add fill layer with color based on downloaded status
+                map.addLayer({
+                    id: 'lidar-tiles-fill',
+                    type: 'fill',
+                    source: 'lidar-tiles',
+                    paint: {
+                        'fill-color': [
+                            'case',
+                            ['==', ['get', 'downloaded'], 1],
+                            '#4CAF50',  // Green for downloaded
+                            '#E91E63'   // Pink for not downloaded
+                        ],
+                        'fill-opacity': 0.25
+                    }
+                });
+
+                // Add outline layer
+                map.addLayer({
+                    id: 'lidar-tiles-outline',
+                    type: 'line',
+                    source: 'lidar-tiles',
+                    paint: {
+                        'line-color': [
+                            'case',
+                            ['==', ['get', 'downloaded'], 1],
+                            '#4CAF50',
+                            '#E91E63'
+                        ],
+                        'line-width': 1.5,
+                        'line-opacity': 0.8
+                    }
+                });
+
+                // Add click handler (only once)
+                if (!this.handlersAdded) {
+                    map.on('click', 'lidar-tiles-fill', function(e) {
+                        if (!self.enabled) return;
+                        if (e.features.length === 0) return;
+
+                        var feature = e.features[0];
+                        var props = feature.properties;
+                        var isDownloaded = self.downloadedTiles[props.filename];
+                        var isDownloading = self.downloading[props.filename];
+
+                        var btnHtml;
+                        if (isDownloaded) {
+                            btnHtml = '<span class="download-btn" style="background: #4CAF50; cursor: default;">Downloaded</span>';
+                        } else if (isDownloading) {
+                            btnHtml = '<span class="download-btn" style="background: #FF9800; cursor: wait;">Downloading...</span>';
+                        } else {
+                            btnHtml = '<a class="download-btn" href="#" onclick="LidarViewer.downloadTile(\\'' + props.filename + '\\'); return false;">Download Tile</a>';
+                        }
+
+                        var html = '<div class="lidar-popup">' +
+                            '<h4>LiDAR Tile</h4>' +
+                            '<div class="lidar-grid">' +
+                            '<span class="lidar-label">File:</span>' +
+                            '<span class="lidar-value">' + props.filename + '</span>' +
+                            '<span class="lidar-label">Size:</span>' +
+                            '<span class="lidar-value">' + props.size_mb + ' MB</span>' +
+                            '<span class="lidar-label">Grid:</span>' +
+                            '<span class="lidar-value">' + props.grid_x + ', ' + props.grid_y + ' km</span>' +
+                            '<span class="lidar-label">Status:</span>' +
+                            '<span class="lidar-value">' + (isDownloaded ? 'Downloaded' : 'Not downloaded') + '</span>' +
+                            '</div>' +
+                            btnHtml +
+                            '</div>';
+
+                        new maplibregl.Popup()
+                            .setLngLat(e.lngLat)
+                            .setHTML(html)
+                            .addTo(map);
+                    });
+
+                    // Change cursor on hover
+                    map.on('mouseenter', 'lidar-tiles-fill', function() {
+                        map.getCanvas().style.cursor = 'pointer';
+                    });
+                    map.on('mouseleave', 'lidar-tiles-fill', function() {
+                        map.getCanvas().style.cursor = '';
+                    });
+
+                    this.handlersAdded = true;
+                }
+
+                // Fit map to tiles
+                if (this.tiles.features.length > 0) {
+                    var bounds = new maplibregl.LngLatBounds();
+                    this.tiles.features.forEach(function(f) {
+                        f.geometry.coordinates[0].forEach(function(coord) {
+                            bounds.extend(coord);
+                        });
+                    });
+                    map.fitBounds(bounds, { padding: 50 });
+                }
+            },
+
+            createProgressBar: function(statusDiv) {
+                // Clear existing content safely
+                while (statusDiv.firstChild) {
+                    statusDiv.removeChild(statusDiv.firstChild);
+                }
+
+                // Create progress container
+                var progressDiv = document.createElement('div');
+                progressDiv.className = 'lidar-progress';
+
+                var progressBar = document.createElement('div');
+                progressBar.className = 'lidar-progress-bar';
+
+                var progressFill = document.createElement('div');
+                progressFill.className = 'lidar-progress-fill';
+                progressFill.id = 'lidarProgressFill';
+                progressFill.style.width = '0%';
+
+                var progressText = document.createElement('div');
+                progressText.className = 'lidar-progress-text';
+                progressText.id = 'lidarProgressText';
+                progressText.textContent = 'Starting download...';
+
+                progressBar.appendChild(progressFill);
+                progressDiv.appendChild(progressBar);
+                progressDiv.appendChild(progressText);
+                statusDiv.appendChild(progressDiv);
+            },
+
+            downloadTile: function(filename) {
+                var self = this;
+                if (!this.orderId) return;
+
+                // Check if already downloaded or downloading
+                if (this.downloadedTiles[filename]) {
+                    alert('This tile is already downloaded');
+                    return;
+                }
+                if (this.downloading[filename]) {
+                    alert('This tile is currently downloading');
+                    return;
+                }
+
+                // Mark as downloading
+                this.downloading[filename] = true;
+                var statusDiv = document.getElementById('lidarStatus');
+
+                // Create progress bar using safe DOM methods
+                if (statusDiv) {
+                    this.createProgressBar(statusDiv);
+                }
+
+                // Close any open popups
+                var popups = document.getElementsByClassName('maplibregl-popup');
+                while (popups.length > 0) {
+                    popups[0].remove();
+                }
+
+                // Use fetch with streaming for SSE progress
+                var url = '/api/orders/' + this.orderId + '/lidar-tiles/' + encodeURIComponent(filename) + '/download';
+
+                fetch(url, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'}
+                }).then(function(response) {
+                    var reader = response.body.getReader();
+                    var decoder = new TextDecoder();
+
+                    function read() {
+                        reader.read().then(function(result) {
+                            if (result.done) return;
+
+                            var text = decoder.decode(result.value);
+                            var lines = text.split('\\n');
+
+                            lines.forEach(function(line) {
+                                if (line.startsWith('data: ')) {
+                                    try {
+                                        var data = JSON.parse(line.substring(6));
+                                        self.handleDownloadProgress(filename, data);
+                                    } catch (e) {
+                                        console.error('Failed to parse SSE data:', e);
+                                    }
+                                }
+                            });
+
+                            read();
+                        });
+                    }
+                    read();
+                }).catch(function(err) {
+                    delete self.downloading[filename];
+                    console.error('Failed to download tile:', err);
+                    if (statusDiv) statusDiv.textContent = 'Download failed: ' + err.message;
+                });
+            },
+
+            handleDownloadProgress: function(filename, data) {
+                var self = this;
+                var statusDiv = document.getElementById('lidarStatus');
+                var progressFill = document.getElementById('lidarProgressFill');
+                var progressText = document.getElementById('lidarProgressText');
+
+                if (data.status === 'downloading') {
+                    if (progressFill) progressFill.style.width = data.percent + '%';
+                    if (progressText) {
+                        var downloadedMB = (data.downloaded / (1024 * 1024)).toFixed(1);
+                        var totalMB = (data.total / (1024 * 1024)).toFixed(1);
+                        progressText.textContent = downloadedMB + ' / ' + totalMB + ' MB (' + data.percent + '%)';
+                    }
+                } else if (data.status === 'downloaded' || data.status === 'already_downloaded') {
+                    delete this.downloading[filename];
+                    this.downloadedTiles[filename] = true;
+
+                    // Update the feature property
+                    if (this.tiles) {
+                        this.tiles.features.forEach(function(f) {
+                            if (f.properties.filename === filename) {
+                                f.properties.downloaded = 1;
+                            }
+                        });
+                        this.renderTiles();
+                    }
+
+                    var downloadedCount = Object.keys(this.downloadedTiles).length;
+                    if (statusDiv) {
+                        statusDiv.textContent = this.tiles.features.length + ' tiles (' + downloadedCount + ' downloaded)';
+                    }
+                } else if (data.status === 'error') {
+                    delete this.downloading[filename];
+                    if (statusDiv) statusDiv.textContent = 'Download failed: ' + data.error;
+                    alert('Download failed: ' + data.error);
+                }
+            },
+
+            removeTiles: function() {
+                if (!MapViewer.map) return;
+                var map = MapViewer.map;
+
+                if (map.getLayer('lidar-tiles-fill')) {
+                    map.removeLayer('lidar-tiles-fill');
+                }
+                if (map.getLayer('lidar-tiles-outline')) {
+                    map.removeLayer('lidar-tiles-outline');
+                }
+                if (map.getSource('lidar-tiles')) {
+                    map.removeSource('lidar-tiles');
+                }
+                this.tiles = null;
+            }
+        };
+
+        // Initialize LiDAR viewer
+        LidarViewer.init();
 
         // ==================== Geo Chat Assistant ====================
         var GeoChat = {

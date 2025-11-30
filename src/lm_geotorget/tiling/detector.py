@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 import json
+import re
 import zipfile
 
 
@@ -16,6 +17,7 @@ class DataType(Enum):
     """Supported data types from Lantmateriet."""
     VECTOR_GPKG = "vector_gpkg"      # GeoPackage -> PostGIS
     LIDAR_LAZ = "lidar_laz"          # LAZ/LAS -> file storage
+    LIDAR_INDEX = "lidar_index"      # LiDAR tile index (on-demand download)
     RASTER_DEM = "raster_dem"        # GeoTIFF elevation
     RASTER_ORTHO = "raster_ortho"    # Orthophoto GeoTIFF/JP2
     UNKNOWN = "unknown"
@@ -31,6 +33,16 @@ class DetectedFile:
 
 
 @dataclass
+class LidarTile:
+    """Information about a LiDAR tile from an index file."""
+    filename: str
+    href: str
+    size: int
+    grid_x: int  # km in SWEREF99 TM (e.g., 640 = 6400000m)
+    grid_y: int  # km in SWEREF99 TM (e.g., 50 = 500000m)
+
+
+@dataclass
 class DetectedOrder:
     """Result of order type detection."""
     order_id: str
@@ -39,6 +51,7 @@ class DetectedOrder:
     total_size: int = 0
     metadata: dict = field(default_factory=dict)
     layers: list[str] = field(default_factory=list)  # For GPKG: list of layer names
+    lidar_tiles: list[LidarTile] = field(default_factory=list)  # For LiDAR index format
 
 
 # File extension to data type mapping
@@ -97,6 +110,20 @@ def detect_order_type(order_dir: Path) -> DetectedOrder:
         except (json.JSONDecodeError, IOError):
             pass
 
+    # Check for LiDAR index format first (files like "63_5", "64_4" containing JSON arrays)
+    lidar_tiles = _detect_lidar_index(order_dir)
+    if lidar_tiles:
+        total_size = sum(tile.size for tile in lidar_tiles)
+        return DetectedOrder(
+            order_id=order_id,
+            data_type=DataType.LIDAR_INDEX,
+            files=[],
+            total_size=total_size,
+            metadata=metadata,
+            layers=[],
+            lidar_tiles=lidar_tiles
+        )
+
     # Scan all ZIP files in the directory
     for zip_path in order_dir.glob("*.zip"):
         try:
@@ -132,6 +159,80 @@ def detect_order_type(order_dir: Path) -> DetectedOrder:
         metadata=metadata,
         layers=layers
     )
+
+
+def _detect_lidar_index(order_dir: Path) -> list[LidarTile]:
+    """
+    Detect LiDAR tile index format.
+
+    LiDAR orders from Lantmateriet may come as index files (e.g., "63_5", "64_4")
+    containing JSON arrays of tile download links instead of actual .laz files.
+
+    Returns:
+        List of LidarTile objects if index format detected, empty list otherwise.
+    """
+    tiles = []
+
+    # Pattern for index files: digits_digits (e.g., "63_5", "64_4")
+    index_pattern = re.compile(r'^(\d+)_(\d+)$')
+
+    for file_path in order_dir.iterdir():
+        if not file_path.is_file():
+            continue
+
+        match = index_pattern.match(file_path.name)
+        if not match:
+            continue
+
+        # Try to parse as JSON array of tile links
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Check if it looks like JSON array
+            if not content.strip().startswith('['):
+                continue
+
+            data = json.loads(content)
+            if not isinstance(data, list):
+                continue
+
+            # Parse each tile entry
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+
+                href = entry.get('href', '')
+                title = entry.get('title', '')
+                length = entry.get('length', 0)
+
+                # Only process .laz files
+                if not title.endswith('.laz'):
+                    continue
+
+                # Parse coordinates from filename
+                # Format: {scan_id}_{x}_{y}_{suffix}.laz (e.g., 20C020_650_60_0000.laz)
+                tile_match = re.match(r'^[^_]+_(\d+)_(\d+)_.*\.laz$', title)
+                if tile_match:
+                    grid_x = int(tile_match.group(1))
+                    grid_y = int(tile_match.group(2))
+                else:
+                    # Default to index file coordinates if can't parse
+                    grid_x = int(match.group(1)) * 10
+                    grid_y = int(match.group(2)) * 10
+
+                tiles.append(LidarTile(
+                    filename=title,
+                    href=href,
+                    size=length,
+                    grid_x=grid_x,
+                    grid_y=grid_y
+                ))
+
+        except (json.JSONDecodeError, IOError, ValueError):
+            continue
+
+    return tiles
 
 
 def _determine_type(files: list[DetectedFile], metadata: dict) -> DataType:
@@ -230,6 +331,7 @@ def get_type_label(data_type: DataType) -> str:
     labels = {
         DataType.VECTOR_GPKG: "Vector (GeoPackage)",
         DataType.LIDAR_LAZ: "LiDAR (LAZ)",
+        DataType.LIDAR_INDEX: "LiDAR (On-Demand)",
         DataType.RASTER_DEM: "Raster (DEM)",
         DataType.RASTER_ORTHO: "Raster (Orthophoto)",
         DataType.UNKNOWN: "Unknown",
@@ -242,6 +344,7 @@ def get_type_color(data_type: DataType) -> str:
     colors = {
         DataType.VECTOR_GPKG: "#4CAF50",   # Green
         DataType.LIDAR_LAZ: "#9C27B0",      # Purple
+        DataType.LIDAR_INDEX: "#E91E63",    # Pink
         DataType.RASTER_DEM: "#FF9800",     # Orange
         DataType.RASTER_ORTHO: "#2196F3",   # Blue
         DataType.UNKNOWN: "#757575",        # Gray

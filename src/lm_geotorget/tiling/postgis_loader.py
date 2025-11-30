@@ -85,9 +85,9 @@ class PostGISLoader:
 
         self.connection_string = connection_string
         self.schema = schema
-        self._conn: Optional[psycopg2.extensions.connection] = None
+        self._conn = None
 
-    def _get_conn(self) -> psycopg2.extensions.connection:
+    def _get_conn(self):
         """Get or create database connection."""
         if self._conn is None or self._conn.closed:
             self._conn = psycopg2.connect(self.connection_string)
