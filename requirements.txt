@@ -1,0 +1,15 @@
+requests>=2.28.0
+tqdm>=4.64.0
+
+# PostGIS integration
+psycopg2-binary>=2.9.0
+
+# Management server (dashboard, publish operations)
+flask>=3.0.0
+
+# Geodata API server (query published data)
+fastapi>=0.100.0
+uvicorn>=0.20.0
+
+# Optional: for accurate SWEREF99 to WGS84 coordinate transformation
+# pyproj>=3.4.0
