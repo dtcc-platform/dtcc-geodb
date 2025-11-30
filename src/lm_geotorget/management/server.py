@@ -2361,6 +2361,160 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             0%, 60%, 100% { transform: translateY(0); }
             30% { transform: translateY(-4px); }
         }
+
+        /* Train Viewer Styles */
+        .train-controls {
+            margin-top: 1rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border-subtle);
+        }
+        .train-toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .train-toggle-row input[type="checkbox"] {
+            accent-color: var(--gold);
+        }
+        .train-toggle-row label {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+        }
+        .train-refresh-btn {
+            display: none;
+            padding: 0.4rem 0.8rem;
+            background: var(--dark-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-top: 0.5rem;
+        }
+        .train-refresh-btn:hover {
+            border-color: var(--gold);
+            color: var(--gold);
+        }
+        .train-refresh-btn.visible {
+            display: inline-block;
+        }
+        .train-refresh-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .train-status {
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            margin-top: 0.25rem;
+        }
+        .train-popup {
+            font-family: 'Montserrat', sans-serif;
+            padding: 0;
+        }
+        .train-popup h4 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: var(--gold);
+            border-bottom: 1px solid var(--border-subtle);
+            padding-bottom: 6px;
+        }
+        .train-popup p {
+            margin: 4px 0;
+            font-size: 12px;
+            color: var(--text-primary);
+        }
+        .train-popup .delay-ok { color: #48bb78; }
+        .train-popup .delay-warn { color: #ed8936; }
+        .train-popup .delay-bad { color: #f56565; }
+        .maplibregl-popup-content {
+            background: var(--dark-bg);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .maplibregl-popup-tip {
+            border-top-color: var(--dark-bg);
+        }
+        .maplibregl-popup-close-button {
+            color: var(--text-secondary);
+            font-size: 18px;
+        }
+        .maplibregl-popup-close-button:hover {
+            color: var(--text-primary);
+            background: transparent;
+        }
+
+        /* Weather Viewer Styles */
+        .weather-toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .weather-toggle-row input[type="checkbox"] {
+            accent-color: var(--gold);
+        }
+        .weather-toggle-row label {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+        }
+        .weather-refresh-btn {
+            display: none;
+            padding: 0.4rem 0.8rem;
+            background: var(--dark-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            margin-top: 0.5rem;
+            margin-left: 0.5rem;
+        }
+        .weather-refresh-btn:hover {
+            border-color: var(--gold);
+            color: var(--gold);
+        }
+        .weather-refresh-btn.visible {
+            display: inline-block;
+        }
+        .weather-refresh-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .weather-status {
+            font-size: 0.7rem;
+            color: var(--text-dim);
+            margin-top: 0.25rem;
+        }
+        .weather-popup {
+            font-family: 'Montserrat', sans-serif;
+            min-width: 200px;
+        }
+        .weather-popup h4 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: var(--gold);
+            border-bottom: 1px solid var(--border-subtle);
+            padding-bottom: 6px;
+        }
+        .weather-popup .weather-grid {
+            display: grid;
+            grid-template-columns: auto auto;
+            gap: 4px 12px;
+            font-size: 12px;
+        }
+        .weather-popup .weather-label {
+            color: var(--text-secondary);
+        }
+        .weather-popup .weather-value {
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+        .weather-popup .temp-cold { color: #63b3ed; }
+        .weather-popup .temp-cool { color: #68d391; }
+        .weather-popup .temp-warm { color: #f6ad55; }
+        .weather-popup .temp-hot { color: #fc8181; }
     </style>
 </head>
 <body>
@@ -2428,6 +2582,20 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             <div class="split-left">
                 <div class="orders-grid" id="ordersGrid">
                     <div class="empty-state">Loading orders...</div>
+                </div>
+                <div class="train-controls">
+                    <div class="train-toggle-row">
+                        <input type="checkbox" id="trainToggle">
+                        <label for="trainToggle">Live Trains</label>
+                    </div>
+                    <button class="train-refresh-btn" id="trainRefreshBtn">↻ Refresh Trains</button>
+                    <div class="train-status" id="trainStatus"></div>
+                    <div class="weather-toggle-row" style="margin-top: 0.75rem;">
+                        <input type="checkbox" id="weatherToggle">
+                        <label for="weatherToggle">Weather Stations</label>
+                    </div>
+                    <button class="weather-refresh-btn" id="weatherRefreshBtn">↻ Refresh Weather</button>
+                    <div class="weather-status" id="weatherStatus"></div>
                 </div>
             </div>
             <div class="split-right">
@@ -3597,6 +3765,11 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 if (features.length === 0) return;
 
                 var feature = features[0];
+
+                // Skip if clicking on trains or weather layers (they have their own popups)
+                if (feature.layer && (feature.layer.id === 'trains-layer' || feature.layer.id === 'weather-layer')) {
+                    return;
+                }
                 var popupContent = document.createElement('div');
 
                 Object.keys(feature.properties).forEach(function(key) {
@@ -3642,6 +3815,486 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         if (typeof maplibregl !== 'undefined') {
             MapViewer.init();
         }
+
+        // ==================== Train Viewer ====================
+        var TrainViewer = {
+            stations: null,
+            trains: [],
+            enabled: false,
+            apiUrl: 'https://api.trafikinfo.trafikverket.se/v2/data.json',
+            handlersAdded: false,
+
+            init: function() {
+                var self = this;
+                var toggle = document.getElementById('trainToggle');
+                var refreshBtn = document.getElementById('trainRefreshBtn');
+
+                if (!toggle || !refreshBtn) return;
+
+                toggle.addEventListener('change', function() {
+                    self.enabled = this.checked;
+                    refreshBtn.classList.toggle('visible', self.enabled);
+                    if (self.enabled) {
+                        self.loadTrains();
+                    } else {
+                        self.clearTrains();
+                        document.getElementById('trainStatus').textContent = '';
+                    }
+                });
+
+                refreshBtn.addEventListener('click', function() {
+                    self.loadTrains();
+                });
+            },
+
+            fetchStations: async function() {
+                if (this.stations) return this.stations;
+
+                var xml = '<REQUEST>' +
+                    '<LOGIN authenticationkey="demokey"/>' +
+                    '<QUERY objecttype="TrainStation" schemaversion="1.4">' +
+                    '<FILTER><EQ name="Advertised" value="true"/></FILTER>' +
+                    '<INCLUDE>LocationSignature</INCLUDE>' +
+                    '<INCLUDE>AdvertisedLocationName</INCLUDE>' +
+                    '<INCLUDE>Geometry.WGS84</INCLUDE>' +
+                    '</QUERY></REQUEST>';
+
+                var response = await fetch(this.apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/xml' },
+                    body: xml
+                });
+                var data = await response.json();
+
+                this.stations = {};
+                var stationList = data.RESPONSE?.RESULT?.[0]?.TrainStation || [];
+                stationList.forEach(function(s) {
+                    if (s.Geometry?.WGS84) {
+                        var match = s.Geometry.WGS84.match(/POINT \\(([\\d.]+) ([\\d.]+)\\)/);
+                        if (match) {
+                            this.stations[s.LocationSignature] = {
+                                name: s.AdvertisedLocationName,
+                                lng: parseFloat(match[1]),
+                                lat: parseFloat(match[2])
+                            };
+                        }
+                    }
+                }, this);
+
+                return this.stations;
+            },
+
+            fetchTrains: async function() {
+                var xml = '<REQUEST>' +
+                    '<LOGIN authenticationkey="demokey"/>' +
+                    '<QUERY objecttype="TrainAnnouncement" schemaversion="1.9" limit="500">' +
+                    '<FILTER>' +
+                    '<AND>' +
+                    '<EXISTS name="TimeAtLocation" value="true"/>' +
+                    '<GT name="TimeAtLocation" value="$dateadd(-00:15:00)"/>' +
+                    '<LT name="TimeAtLocation" value="$dateadd(00:05:00)"/>' +
+                    '</AND>' +
+                    '</FILTER>' +
+                    '<INCLUDE>AdvertisedTrainIdent</INCLUDE>' +
+                    '<INCLUDE>LocationSignature</INCLUDE>' +
+                    '<INCLUDE>FromLocation</INCLUDE>' +
+                    '<INCLUDE>ToLocation</INCLUDE>' +
+                    '<INCLUDE>TimeAtLocation</INCLUDE>' +
+                    '<INCLUDE>AdvertisedTimeAtLocation</INCLUDE>' +
+                    '<INCLUDE>Operator</INCLUDE>' +
+                    '<INCLUDE>ActivityType</INCLUDE>' +
+                    '</QUERY></REQUEST>';
+
+                var response = await fetch(this.apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/xml' },
+                    body: xml
+                });
+                var data = await response.json();
+                return data.RESPONSE?.RESULT?.[0]?.TrainAnnouncement || [];
+            },
+
+            loadTrains: async function() {
+                var statusEl = document.getElementById('trainStatus');
+                var refreshBtn = document.getElementById('trainRefreshBtn');
+                refreshBtn.disabled = true;
+                statusEl.textContent = 'Loading...';
+
+                try {
+                    await this.fetchStations();
+                    var announcements = await this.fetchTrains();
+
+                    // Group by train ID, keep most recent per train
+                    var trainMap = {};
+                    announcements.forEach(function(a) {
+                        var id = a.AdvertisedTrainIdent;
+                        var station = this.stations[a.LocationSignature];
+                        if (!station) return;
+
+                        var delay = 0;
+                        if (a.TimeAtLocation && a.AdvertisedTimeAtLocation) {
+                            var actual = new Date(a.TimeAtLocation);
+                            var scheduled = new Date(a.AdvertisedTimeAtLocation);
+                            delay = Math.round((actual - scheduled) / 60000);
+                        }
+
+                        var from = a.FromLocation?.[0]?.LocationName || '';
+                        var to = a.ToLocation?.[0]?.LocationName || '';
+
+                        // Resolve station names
+                        if (this.stations[from]) from = this.stations[from].name;
+                        if (this.stations[to]) to = this.stations[to].name;
+
+                        if (!trainMap[id] || new Date(a.TimeAtLocation) > new Date(trainMap[id].time)) {
+                            trainMap[id] = {
+                                id: id,
+                                lng: station.lng,
+                                lat: station.lat,
+                                stationName: station.name,
+                                from: from,
+                                to: to,
+                                delay: delay,
+                                operator: a.Operator || 'Unknown',
+                                time: a.TimeAtLocation
+                            };
+                        }
+                    }, this);
+
+                    this.trains = Object.values(trainMap);
+                    this.renderTrains();
+
+                    var now = new Date().toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+                    statusEl.textContent = this.trains.length + ' trains - Updated ' + now;
+
+                } catch (err) {
+                    statusEl.textContent = 'Error: ' + err.message;
+                }
+
+                refreshBtn.disabled = false;
+            },
+
+            renderTrains: function() {
+                if (!MapViewer.map) return;
+
+                // Remove existing layer and source
+                if (MapViewer.map.getLayer('trains-layer')) {
+                    MapViewer.map.removeLayer('trains-layer');
+                }
+                if (MapViewer.map.getSource('trains-source')) {
+                    MapViewer.map.removeSource('trains-source');
+                }
+
+                if (this.trains.length === 0) return;
+
+                // Create GeoJSON
+                var geojson = {
+                    type: 'FeatureCollection',
+                    features: this.trains.map(function(t) {
+                        return {
+                            type: 'Feature',
+                            geometry: {
+                                type: 'Point',
+                                coordinates: [t.lng, t.lat]
+                            },
+                            properties: t
+                        };
+                    })
+                };
+
+                MapViewer.map.addSource('trains-source', {
+                    type: 'geojson',
+                    data: geojson
+                });
+
+                MapViewer.map.addLayer({
+                    id: 'trains-layer',
+                    type: 'circle',
+                    source: 'trains-source',
+                    paint: {
+                        'circle-radius': 8,
+                        'circle-color': [
+                            'case',
+                            ['<', ['get', 'delay'], 1], '#48bb78',
+                            ['<', ['get', 'delay'], 10], '#ed8936',
+                            '#f56565'
+                        ],
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#ffffff'
+                    }
+                });
+
+                // Add click handler only once
+                if (!this.handlersAdded) {
+                    var self = this;
+                    MapViewer.map.on('click', 'trains-layer', function(e) {
+                        var props = e.features[0].properties;
+                        var delayClass = props.delay < 1 ? 'delay-ok' : (props.delay < 10 ? 'delay-warn' : 'delay-bad');
+                        var delayText = props.delay <= 0 ? 'On time' : props.delay + ' min delay';
+
+                        var html = '<div class="train-popup">' +
+                            '<h4>Train ' + props.id + '</h4>' +
+                            '<p>' + (props.from || '?') + ' → ' + (props.to || '?') + '</p>' +
+                            '<p>At: ' + props.stationName + '</p>' +
+                            '<p class="' + delayClass + '">Status: ' + delayText + '</p>' +
+                            '<p>Operator: ' + props.operator + '</p>' +
+                            '</div>';
+
+                        new maplibregl.Popup()
+                            .setLngLat(e.lngLat)
+                            .setHTML(html)
+                            .addTo(MapViewer.map);
+                    });
+
+                    MapViewer.map.on('mouseenter', 'trains-layer', function() {
+                        MapViewer.map.getCanvas().style.cursor = 'pointer';
+                    });
+                    MapViewer.map.on('mouseleave', 'trains-layer', function() {
+                        MapViewer.map.getCanvas().style.cursor = '';
+                    });
+                    this.handlersAdded = true;
+                }
+            },
+
+            clearTrains: function() {
+                if (!MapViewer.map) return;
+                if (MapViewer.map.getLayer('trains-layer')) {
+                    MapViewer.map.removeLayer('trains-layer');
+                }
+                if (MapViewer.map.getSource('trains-source')) {
+                    MapViewer.map.removeSource('trains-source');
+                }
+                this.trains = [];
+            }
+        };
+
+        // Initialize train viewer
+        TrainViewer.init();
+
+        // ==================== Weather Viewer ====================
+        var WeatherViewer = {
+            stations: [],
+            enabled: false,
+            apiUrl: 'https://api.trafikinfo.trafikverket.se/v2/data.json',
+            handlersAdded: false,
+
+            init: function() {
+                var self = this;
+                var toggle = document.getElementById('weatherToggle');
+                var refreshBtn = document.getElementById('weatherRefreshBtn');
+
+                if (!toggle || !refreshBtn) return;
+
+                toggle.addEventListener('change', function() {
+                    self.enabled = this.checked;
+                    refreshBtn.classList.toggle('visible', self.enabled);
+                    if (self.enabled) {
+                        self.loadWeather();
+                    } else {
+                        self.clearWeather();
+                        document.getElementById('weatherStatus').textContent = '';
+                    }
+                });
+
+                refreshBtn.addEventListener('click', function() {
+                    self.loadWeather();
+                });
+            },
+
+            fetchWeather: async function() {
+                var xml = '<REQUEST>' +
+                    '<LOGIN authenticationkey="demokey"/>' +
+                    '<QUERY objecttype="WeatherMeasurepoint" namespace="road.weatherinfo" schemaversion="2.1">' +
+                    '<FILTER></FILTER>' +
+                    '<INCLUDE>Id</INCLUDE>' +
+                    '<INCLUDE>Name</INCLUDE>' +
+                    '<INCLUDE>Geometry.WGS84</INCLUDE>' +
+                    '<INCLUDE>Observation.Sample</INCLUDE>' +
+                    '<INCLUDE>Observation.Air.Temperature.Value</INCLUDE>' +
+                    '<INCLUDE>Observation.Air.RelativeHumidity.Value</INCLUDE>' +
+                    '<INCLUDE>Observation.Air.VisibleDistance.Value</INCLUDE>' +
+                    '<INCLUDE>Observation.Wind</INCLUDE>' +
+                    '<INCLUDE>Observation.Weather.Precipitation</INCLUDE>' +
+                    '<INCLUDE>Observation.Surface.Temperature.Value</INCLUDE>' +
+                    '</QUERY></REQUEST>';
+
+                var response = await fetch(this.apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'text/xml' },
+                    body: xml
+                });
+                var data = await response.json();
+                return data.RESPONSE?.RESULT?.[0]?.WeatherMeasurepoint || [];
+            },
+
+            loadWeather: async function() {
+                var statusEl = document.getElementById('weatherStatus');
+                var refreshBtn = document.getElementById('weatherRefreshBtn');
+                refreshBtn.disabled = true;
+                statusEl.textContent = 'Loading...';
+
+                try {
+                    var rawStations = await this.fetchWeather();
+
+                    this.stations = rawStations.map(function(s) {
+                        var coords = null;
+                        if (s.Geometry?.WGS84) {
+                            var match = s.Geometry.WGS84.match(/POINT \\(([\\d.-]+) ([\\d.-]+)\\)/);
+                            if (match) {
+                                coords = { lng: parseFloat(match[1]), lat: parseFloat(match[2]) };
+                            }
+                        }
+                        if (!coords) return null;
+
+                        var obs = s.Observation || {};
+                        var wind = obs.Wind?.[0] || {};
+
+                        return {
+                            id: s.Id,
+                            name: s.Name,
+                            lng: coords.lng,
+                            lat: coords.lat,
+                            airTemp: obs.Air?.Temperature?.Value,
+                            surfaceTemp: obs.Surface?.Temperature?.Value,
+                            humidity: obs.Air?.RelativeHumidity?.Value,
+                            visibility: obs.Air?.VisibleDistance?.Value,
+                            windSpeed: wind.Speed?.Value,
+                            windDir: wind.Direction?.Value,
+                            precipitation: obs.Weather?.Precipitation || 'unknown',
+                            sample: obs.Sample
+                        };
+                    }).filter(function(s) { return s !== null; });
+
+                    this.renderWeather();
+
+                    var now = new Date().toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+                    statusEl.textContent = this.stations.length + ' stations - Updated ' + now;
+
+                } catch (err) {
+                    statusEl.textContent = 'Error: ' + err.message;
+                }
+
+                refreshBtn.disabled = false;
+            },
+
+            renderWeather: function() {
+                if (!MapViewer.map) return;
+
+                // Remove existing layer and source
+                if (MapViewer.map.getLayer('weather-layer')) {
+                    MapViewer.map.removeLayer('weather-layer');
+                }
+                if (MapViewer.map.getSource('weather-source')) {
+                    MapViewer.map.removeSource('weather-source');
+                }
+
+                if (this.stations.length === 0) return;
+
+                // Create GeoJSON
+                var geojson = {
+                    type: 'FeatureCollection',
+                    features: this.stations.map(function(s) {
+                        return {
+                            type: 'Feature',
+                            geometry: {
+                                type: 'Point',
+                                coordinates: [s.lng, s.lat]
+                            },
+                            properties: s
+                        };
+                    })
+                };
+
+                MapViewer.map.addSource('weather-source', {
+                    type: 'geojson',
+                    data: geojson
+                });
+
+                MapViewer.map.addLayer({
+                    id: 'weather-layer',
+                    type: 'circle',
+                    source: 'weather-source',
+                    paint: {
+                        'circle-radius': 7,
+                        'circle-color': [
+                            'case',
+                            ['<', ['get', 'airTemp'], 0], '#3182ce',
+                            ['<', ['get', 'airTemp'], 10], '#38a169',
+                            ['<', ['get', 'airTemp'], 20], '#dd6b20',
+                            '#e53e3e'
+                        ],
+                        'circle-stroke-width': 2,
+                        'circle-stroke-color': '#1a1a2e'
+                    }
+                });
+
+                // Add click handler only once
+                if (!this.handlersAdded) {
+                    var self = this;
+                    MapViewer.map.on('click', 'weather-layer', function(e) {
+                        var p = e.features[0].properties;
+
+                        var tempClass = 'temp-cool';
+                        if (p.airTemp < 0) tempClass = 'temp-cold';
+                        else if (p.airTemp >= 20) tempClass = 'temp-hot';
+                        else if (p.airTemp >= 10) tempClass = 'temp-warm';
+
+                        var windDirText = self.getWindDirection(p.windDir);
+                        var visKm = p.visibility ? (p.visibility / 1000).toFixed(1) + ' km' : 'N/A';
+
+                        var html = '<div class="weather-popup">' +
+                            '<h4>' + p.name + '</h4>' +
+                            '<div class="weather-grid">' +
+                            '<span class="weather-label">Air Temp:</span>' +
+                            '<span class="weather-value ' + tempClass + '">' + (p.airTemp != null ? p.airTemp.toFixed(1) + ' C' : 'N/A') + '</span>' +
+                            '<span class="weather-label">Surface:</span>' +
+                            '<span class="weather-value">' + (p.surfaceTemp != null ? p.surfaceTemp.toFixed(1) + ' C' : 'N/A') + '</span>' +
+                            '<span class="weather-label">Humidity:</span>' +
+                            '<span class="weather-value">' + (p.humidity != null ? p.humidity.toFixed(0) + '%' : 'N/A') + '</span>' +
+                            '<span class="weather-label">Wind:</span>' +
+                            '<span class="weather-value">' + (p.windSpeed != null ? p.windSpeed.toFixed(1) + ' m/s ' + windDirText : 'N/A') + '</span>' +
+                            '<span class="weather-label">Visibility:</span>' +
+                            '<span class="weather-value">' + visKm + '</span>' +
+                            '<span class="weather-label">Precip:</span>' +
+                            '<span class="weather-value">' + p.precipitation + '</span>' +
+                            '</div></div>';
+
+                        new maplibregl.Popup()
+                            .setLngLat(e.lngLat)
+                            .setHTML(html)
+                            .addTo(MapViewer.map);
+                    });
+
+                    MapViewer.map.on('mouseenter', 'weather-layer', function() {
+                        MapViewer.map.getCanvas().style.cursor = 'pointer';
+                    });
+                    MapViewer.map.on('mouseleave', 'weather-layer', function() {
+                        MapViewer.map.getCanvas().style.cursor = '';
+                    });
+                    this.handlersAdded = true;
+                }
+            },
+
+            getWindDirection: function(deg) {
+                if (deg == null) return '';
+                var dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+                var idx = Math.round(deg / 45) % 8;
+                return dirs[idx];
+            },
+
+            clearWeather: function() {
+                if (!MapViewer.map) return;
+                if (MapViewer.map.getLayer('weather-layer')) {
+                    MapViewer.map.removeLayer('weather-layer');
+                }
+                if (MapViewer.map.getSource('weather-source')) {
+                    MapViewer.map.removeSource('weather-source');
+                }
+                this.stations = [];
+            }
+        };
+
+        // Initialize weather viewer
+        WeatherViewer.init();
 
         // ==================== Geo Chat Assistant ====================
         var GeoChat = {
