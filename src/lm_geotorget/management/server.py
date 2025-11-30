@@ -2477,11 +2477,9 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
                     grid.replaceChildren(fragment);
 
-                    // Re-render layer toggles if MapViewer is initialized
-                    if (typeof MapViewer !== 'undefined' && MapViewer.map) {
-                        setTimeout(function() {
-                            MapViewer.renderLayerToggles();
-                        }, 100);
+                    // Re-render layer toggles if MapViewer has discovered layers
+                    if (typeof MapViewer !== 'undefined' && MapViewer.layersDiscovered) {
+                        MapViewer.renderLayerToggles();
                     }
                 })
                 .catch(function(e) {
@@ -2887,6 +2885,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         var MapViewer = {
             map: null,
             layers: {},
+            layersDiscovered: false,
             reloadDebounceTimer: null,
 
             // Initialize the map
@@ -2976,6 +2975,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             // Update layer toggles in order cards
             updateLayerToggles: function() {
                 var self = this;
+                this.layersDiscovered = true;
+
                 // Restore from localStorage
                 var savedState = localStorage.getItem('mapLayerState');
                 if (savedState) {
