@@ -594,6 +594,28 @@ def create_management_app(
             }
         )
 
+    @app.route('/api/orders/<order_id>/lidar-tiles/<tile_name>/file')
+    def serve_lidar_tile(order_id: str, tile_name: str):
+        """Serve a downloaded LiDAR tile file."""
+        from flask import send_file
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        tiles_dir = order_dir / 'tiles'
+        tile_path = tiles_dir / tile_name
+
+        if not tile_path.exists():
+            return jsonify({'error': 'Tile not downloaded yet'}), 404
+
+        return send_file(
+            tile_path,
+            mimetype='application/octet-stream',
+            as_attachment=True,
+            download_name=tile_name
+        )
+
     # ==================== Martin Tile Server ====================
 
     @app.route('/api/martin/status')
@@ -658,6 +680,32 @@ def create_management_app(
             martin_manager.stop()
             return jsonify({'status': 'stopped'})
         return jsonify({'status': 'not_running'})
+
+    @app.route('/api/martin/restart', methods=['POST'])
+    def restart_martin():
+        """Restart Martin server to pick up new tables."""
+        nonlocal martin_manager
+
+        if not martin_manager:
+            if not app.config['db_connection']:
+                return jsonify({'error': 'Database not configured'}), 400
+            martin_manager = MartinManager(app.config['db_connection'])
+
+        if not martin_manager.is_installed():
+            return jsonify({'error': 'Martin not installed'}), 400
+
+        # Stop if running
+        if martin_manager.is_running():
+            martin_manager.stop()
+
+        # Start again
+        if martin_manager.start():
+            return jsonify({
+                'status': 'restarted',
+                'port': martin_manager.port,
+                'catalog_url': f'http://127.0.0.1:{martin_manager.port}/catalog'
+            })
+        return jsonify({'error': 'Failed to restart Martin'}), 500
 
     # ==================== Database Status ====================
 
@@ -811,12 +859,21 @@ def create_management_app(
 
     @app.route('/api/layers/<layer_name>/features')
     def get_layer_features_api(layer_name: str):
-        """Query features from a layer."""
+        """Query features from a layer.
+
+        Query params:
+            bbox: Bounding box format: minX,minY,maxX,maxY
+            bbox_srid: SRID of bbox coordinates (default 3006 for SWEREF99 TM)
+            limit: Max features to return (default 1000, max 10000)
+            srid: Output SRID (default 3006 for SWEREF99 TM, use 4326 for WGS84)
+        """
         if not app.config['db_connection']:
             return jsonify({'error': 'Database not configured'}), 400
 
         bbox = request.args.get('bbox')
+        bbox_srid = int(request.args.get('bbox_srid', 3006))  # Default bbox in SWEREF99 TM
         limit = min(int(request.args.get('limit', 1000)), 10000)
+        output_srid = int(request.args.get('srid', 3006))  # Default output in SWEREF99 TM
 
         try:
             import psycopg2
@@ -833,18 +890,35 @@ def create_management_app(
                     if bbox:
                         bbox_parts = [float(x) for x in bbox.split(',')]
                         if len(bbox_parts) == 4:
-                            where_clause = """
-                                WHERE ST_Intersects(
-                                    geom,
-                                    ST_MakeEnvelope(%s, %s, %s, %s, 4326)
-                                )
-                            """
+                            # bbox_srid specifies the coordinate system of the input bbox
+                            if bbox_srid == 3006:
+                                # bbox already in native SWEREF99 TM
+                                where_clause = """
+                                    WHERE ST_Intersects(
+                                        geom,
+                                        ST_MakeEnvelope(%s, %s, %s, %s, 3006)
+                                    )
+                                """
+                            else:
+                                # Transform bbox to native SRID
+                                where_clause = f"""
+                                    WHERE ST_Intersects(
+                                        geom,
+                                        ST_Transform(ST_MakeEnvelope(%s, %s, %s, %s, {bbox_srid}), 3006)
+                                    )
+                                """
                             params = bbox_parts
+
+                    # Output in requested SRID (default SWEREF99 TM)
+                    if output_srid == 3006:
+                        geom_select = "ST_AsGeoJSON(geom)::json as geometry"
+                    else:
+                        geom_select = f"ST_AsGeoJSON(ST_Transform(geom, {output_srid}))::json as geometry"
 
                     query = f"""
                         SELECT
                             fid,
-                            ST_AsGeoJSON(ST_Transform(geom, 4326))::json as geometry,
+                            {geom_select},
                             *
                         FROM "{schema}"."{layer_name}"
                         {where_clause}
@@ -3509,6 +3583,13 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         addLogEntry('Publish completed successfully', 'success');
                         eventSource.close();
                         showCloseButton();
+                        // Restart Martin to pick up new tables
+                        fetch('/api/martin/restart', { method: 'POST' })
+                            .then(function() {
+                                addLogEntry('Martin restarted for new layers', 'info');
+                                checkMartinStatus();
+                            })
+                            .catch(function() {});
                         setTimeout(function() {
                             closeProgressModal();
                         }, 1500);
@@ -4100,7 +4181,9 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     bounds.getNorth()
                 ].join(',');
 
-                fetch('/api/layers/' + layerName + '/features?bbox=' + bbox + '&limit=5000')
+                // Request WGS84 output for map display, bbox in WGS84 needs conversion
+                // Use srid=4326 for both input bbox and output coordinates
+                fetch('/api/layers/' + layerName + '/features?bbox=' + bbox + '&limit=5000&srid=4326&bbox_srid=4326')
                     .then(function(resp) { return resp.json(); })
                     .then(function(geojson) {
                         layer.loading = false;
