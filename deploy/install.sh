@@ -31,6 +31,10 @@ echo
 # Prompt for domain
 read -p "Enter your domain name (or IP): " DOMAIN
 
+# Prompt for dashboard port
+read -p "Enter dashboard port [5050]: " DASHBOARD_PORT
+DASHBOARD_PORT=${DASHBOARD_PORT:-5050}
+
 echo -e "\n${YELLOW}Installing system dependencies...${NC}"
 apt update
 apt install -y python3 python3-pip python3-venv postgresql postgresql-contrib postgis nginx curl
@@ -88,6 +92,7 @@ cat > $APP_DIR/.env <<EOF
 DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@localhost/$DB_NAME
 FLASK_ENV=production
 DOWNLOADS_DIR=$APP_DIR/downloads
+DASHBOARD_PORT=$DASHBOARD_PORT
 EOF
 
 echo -e "\n${YELLOW}Setting permissions...${NC}"
@@ -98,12 +103,14 @@ chown -R $APP_USER:$APP_USER /var/log/dtcc-geodb
 
 echo -e "\n${YELLOW}Installing systemd service...${NC}"
 cp $SCRIPT_DIR/dtcc-geodb.service /etc/systemd/system/
+sed -i "s/127.0.0.1:5050/127.0.0.1:$DASHBOARD_PORT/g" /etc/systemd/system/dtcc-geodb.service
 systemctl daemon-reload
 systemctl enable dtcc-geodb
 
 echo -e "\n${YELLOW}Configuring Nginx...${NC}"
 cp $SCRIPT_DIR/nginx-dtcc-geodb.conf /etc/nginx/sites-available/dtcc-geodb
 sed -i "s/your-domain.com/$DOMAIN/g" /etc/nginx/sites-available/dtcc-geodb
+sed -i "s/127.0.0.1:5050/127.0.0.1:$DASHBOARD_PORT/g" /etc/nginx/sites-available/dtcc-geodb
 ln -sf /etc/nginx/sites-available/dtcc-geodb /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
