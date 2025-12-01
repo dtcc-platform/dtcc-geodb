@@ -21,6 +21,34 @@ Optional (for accurate coordinate transformation):
 pip install pyproj
 ```
 
+### Martin Tile Server (Optional)
+
+Martin is an optional tile server that improves map performance by serving PostGIS data as vector tiles. The dashboard will auto-start Martin if installed.
+
+**macOS (Homebrew):**
+```bash
+brew install martin
+```
+
+**Linux (pre-built binary):**
+```bash
+curl -LO https://github.com/maplibre/martin/releases/latest/download/martin-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf martin-x86_64-unknown-linux-gnu.tar.gz
+sudo mv martin /usr/local/bin/
+```
+
+**Docker:**
+```bash
+docker pull ghcr.io/maplibre/martin
+```
+
+Verify installation:
+```bash
+martin --version
+```
+
+When Martin is installed and a database is configured, the dashboard will automatically start Martin on port 3000. The status bar will show "Tiles: Martin running" when active. If Martin is not installed, the dashboard falls back to serving GeoJSON directly (slower for large datasets).
+
 ## Usage
 
 ### Download an Order

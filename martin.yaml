@@ -1,0 +1,17 @@
+# Martin configuration for Geotorget
+# Vector tile server for PostGIS data
+
+# PostgreSQL connection - uses DATABASE_URL environment variable
+postgres:
+  connection_string: ${DATABASE_URL}
+
+  # Auto-discover all tables in geotorget schema
+  auto_publish:
+    tables:
+      from_schemas: geotorget
+
+  # Default tile settings
+  default_srid: 4326
+
+# Server settings
+listen_addresses: '127.0.0.1:3000'

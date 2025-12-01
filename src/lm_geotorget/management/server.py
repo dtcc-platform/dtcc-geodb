@@ -12,7 +12,10 @@ This is separate from the serving API which handles geodata queries.
 
 import json
 import os
+import shutil
+import subprocess
 import threading
+import time
 import queue
 from pathlib import Path
 from typing import Optional
@@ -51,6 +54,84 @@ class DownloadProgress:
     error: Optional[str] = None
 
 
+class MartinManager:
+    """Manages Martin tile server subprocess."""
+
+    def __init__(self, db_connection: str, port: int = 3000):
+        self.db_connection = db_connection
+        self.port = port
+        self.process: Optional[subprocess.Popen] = None
+        self._config_path = Path(__file__).parent.parent.parent.parent / 'martin.yaml'
+
+    @staticmethod
+    def is_installed() -> bool:
+        """Check if Martin is installed."""
+        return shutil.which('martin') is not None
+
+    def start(self) -> bool:
+        """Start Martin server."""
+        if not self.is_installed():
+            return False
+
+        if self.process and self.process.poll() is None:
+            return True  # Already running
+
+        # Check if config exists
+        if not self._config_path.exists():
+            print(f"Martin config not found at {self._config_path}")
+            return False
+
+        # Build environment with database URL
+        env = os.environ.copy()
+        env['DATABASE_URL'] = self.db_connection
+
+        try:
+            self.process = subprocess.Popen(
+                ['martin', '--config', str(self._config_path)],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(self._config_path.parent)
+            )
+
+            # Wait briefly and check if started
+            time.sleep(2)
+            if self.process.poll() is not None:
+                # Process exited, read error
+                _, stderr = self.process.communicate()
+                print(f"Martin failed to start: {stderr.decode()}")
+                return False
+
+            return True
+        except Exception as e:
+            print(f"Failed to start Martin: {e}")
+            return False
+
+    def stop(self):
+        """Stop Martin server."""
+        if self.process:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+            self.process = None
+
+    def is_running(self) -> bool:
+        """Check if Martin is running."""
+        if not self.process:
+            return False
+        return self.process.poll() is None
+
+    def get_catalog_url(self) -> str:
+        """Get Martin catalog URL."""
+        return f'http://127.0.0.1:{self.port}/catalog'
+
+    def get_tile_url(self, table: str) -> str:
+        """Get tile URL template for a table."""
+        return f'http://127.0.0.1:{self.port}/{table}/{{z}}/{{x}}/{{y}}'
+
+
 def create_management_app(
     downloads_dir: Path,
     db_connection: Optional[str] = None,
@@ -80,6 +161,11 @@ def create_management_app(
 
     # Store for SSE progress updates
     progress_queues: dict[str, queue.Queue] = {}
+
+    # Martin tile server manager
+    martin_manager: Optional[MartinManager] = None
+    if db_connection:
+        martin_manager = MartinManager(db_connection)
 
     # ==================== Dashboard ====================
 
@@ -113,9 +199,14 @@ def create_management_app(
     @app.route('/api/config', methods=['POST'])
     def set_config():
         """Update configuration."""
+        nonlocal martin_manager
+
         data = request.json
         if 'db_connection' in data:
             app.config['db_connection'] = data['db_connection']
+            # Initialize Martin manager with new connection
+            if data['db_connection']:
+                martin_manager = MartinManager(data['db_connection'])
         if 'schema' in data:
             app.config['schema'] = data['schema']
         return jsonify({'status': 'ok'})
@@ -502,6 +593,71 @@ def create_management_app(
                 'X-Accel-Buffering': 'no'
             }
         )
+
+    # ==================== Martin Tile Server ====================
+
+    @app.route('/api/martin/status')
+    def martin_status():
+        """Get Martin server status."""
+        nonlocal martin_manager
+
+        installed = MartinManager.is_installed()
+
+        if not martin_manager:
+            return jsonify({
+                'installed': installed,
+                'running': False,
+                'configured': False,
+                'message': 'Database not configured' if not app.config['db_connection'] else 'Martin not initialized'
+            })
+
+        return jsonify({
+            'installed': installed,
+            'running': martin_manager.is_running(),
+            'configured': True,
+            'port': martin_manager.port,
+            'catalog_url': martin_manager.get_catalog_url() if martin_manager.is_running() else None
+        })
+
+    @app.route('/api/martin/start', methods=['POST'])
+    def start_martin():
+        """Start Martin server."""
+        nonlocal martin_manager
+
+        if not app.config['db_connection']:
+            return jsonify({'error': 'Database not configured'}), 400
+
+        if not MartinManager.is_installed():
+            return jsonify({
+                'error': 'Martin not installed. Install with: brew install martin (macOS) or download from https://github.com/maplibre/martin'
+            }), 400
+
+        if not martin_manager:
+            martin_manager = MartinManager(app.config['db_connection'])
+
+        if martin_manager.is_running():
+            return jsonify({
+                'status': 'already_running',
+                'catalog_url': martin_manager.get_catalog_url()
+            })
+
+        if martin_manager.start():
+            return jsonify({
+                'status': 'started',
+                'catalog_url': martin_manager.get_catalog_url()
+            })
+        else:
+            return jsonify({'error': 'Failed to start Martin. Check logs for details.'}), 500
+
+    @app.route('/api/martin/stop', methods=['POST'])
+    def stop_martin():
+        """Stop Martin server."""
+        nonlocal martin_manager
+
+        if martin_manager:
+            martin_manager.stop()
+            return jsonify({'status': 'stopped'})
+        return jsonify({'status': 'not_running'})
 
     # ==================== Database Status ====================
 
@@ -2748,6 +2904,10 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 <span id="dbStatusText">Checking database...</span>
             </div>
             <div class="status-item">
+                <span class="status-dot" id="martinStatus"></span>
+                <span id="martinStatusText">Tiles: checking...</span>
+            </div>
+            <div class="status-item">
                 <span id="statsText">-</span>
             </div>
         </div>
@@ -3006,10 +3166,52 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             .then(function() {
                 checkDbStatus();
                 loadOrders();
+                // Try to start Martin after db connection is configured
+                startMartin();
             })
             .catch(function(e) {
                 alert('Failed to save config: ' + e.message);
             });
+        }
+
+        function startMartin() {
+            fetch('/api/martin/start', { method: 'POST' })
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.error) {
+                        console.log('Martin start: ' + data.error);
+                    } else {
+                        console.log('Martin started successfully');
+                    }
+                    checkMartinStatus();
+                })
+                .catch(function(e) {
+                    console.error('Failed to start Martin:', e);
+                    checkMartinStatus();
+                });
+        }
+
+        function checkMartinStatus() {
+            fetch('/api/martin/status')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var dot = document.getElementById('martinStatus');
+                    var text = document.getElementById('martinStatusText');
+
+                    if (!data.installed) {
+                        dot.className = 'status-dot';
+                        text.textContent = 'Tiles: not installed';
+                    } else if (data.running) {
+                        dot.className = 'status-dot connected';
+                        text.textContent = 'Tiles: Martin running';
+                    } else {
+                        dot.className = 'status-dot disconnected';
+                        text.textContent = 'Tiles: Martin stopped';
+                    }
+                })
+                .catch(function(e) {
+                    console.error('Failed to check Martin status:', e);
+                });
         }
 
         function initDb() {
@@ -3220,9 +3422,21 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
                     grid.replaceChildren(fragment);
 
-                    // Re-render layer toggles if MapViewer has discovered layers
-                    if (typeof MapViewer !== 'undefined' && MapViewer.layersDiscovered) {
-                        MapViewer.renderLayerToggles();
+                    // Re-render layer toggles after layers are discovered
+                    if (typeof MapViewer !== 'undefined') {
+                        if (MapViewer.layersDiscovered) {
+                            MapViewer.renderLayerToggles();
+                        } else {
+                            // Layers not yet discovered, poll until ready
+                            var checkInterval = setInterval(function() {
+                                if (MapViewer.layersDiscovered) {
+                                    MapViewer.renderLayerToggles();
+                                    clearInterval(checkInterval);
+                                }
+                            }, 200);
+                            // Stop polling after 5 seconds
+                            setTimeout(function() { clearInterval(checkInterval); }, 5000);
+                        }
                     }
                 })
                 .catch(function(e) {
@@ -3617,10 +3831,12 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         });
 
         checkDbStatus();
+        checkMartinStatus();
         loadOrders();
 
         setInterval(function() {
             checkDbStatus();
+            checkMartinStatus();
             loadOrders();
         }, 30000);
 
@@ -3630,6 +3846,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             layers: {},
             layersDiscovered: false,
             reloadDebounceTimer: null,
+            martinAvailable: false,
+            martinUrl: 'http://127.0.0.1:3000',
 
             // Initialize the map
             init: function() {
@@ -3671,7 +3889,47 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 // Discover layers after map loads
                 this.map.on('load', function() {
                     self.discoverLayers();
+                    self.checkMartinStatus();
                 });
+            },
+
+            // Check Martin tile server status
+            checkMartinStatus: function() {
+                var self = this;
+                fetch('/api/martin/status')
+                    .then(function(resp) { return resp.json(); })
+                    .then(function(data) {
+                        self.martinAvailable = data.running;
+                        self.updateMartinStatusUI(data);
+                        if (data.running) {
+                            console.log('Martin available at ' + self.martinUrl + ', using vector tiles');
+                        } else {
+                            console.log('Martin not available, using GeoJSON fallback');
+                        }
+                    })
+                    .catch(function(e) {
+                        console.error('Failed to check Martin status:', e);
+                        self.martinAvailable = false;
+                        self.updateMartinStatusUI({ installed: false, running: false });
+                    });
+            },
+
+            // Update Martin status in UI
+            updateMartinStatusUI: function(data) {
+                var dot = document.getElementById('martinStatus');
+                var text = document.getElementById('martinStatusText');
+                if (!dot || !text) return;
+
+                if (!data.installed) {
+                    dot.className = 'status-dot';
+                    text.textContent = 'Tiles: not installed';
+                } else if (data.running) {
+                    dot.className = 'status-dot connected';
+                    text.textContent = 'Tiles: Martin running';
+                } else {
+                    dot.className = 'status-dot disconnected';
+                    text.textContent = 'Tiles: Martin stopped';
+                }
             },
 
             // Generate color from string hash
@@ -3818,12 +4076,19 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 }
             },
 
-            // Load layer features from API
+            // Load layer features from API or use vector tiles
             loadLayerFeatures: function(layerName) {
                 var self = this;
                 var layer = this.layers[layerName];
                 if (!layer) return;
 
+                // Use Martin vector tiles if available
+                if (this.martinAvailable) {
+                    this.addVectorTileLayer(layerName);
+                    return;
+                }
+
+                // Fallback to GeoJSON
                 layer.loading = true;
                 this.updateLoadingState(layerName, true);
 
@@ -3840,13 +4105,97 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     .then(function(geojson) {
                         layer.loading = false;
                         self.updateLoadingState(layerName, false);
-                        self.addLayerToMap(layerName, geojson);
+                        self.addGeoJSONLayer(layerName, geojson);
                     })
                     .catch(function(e) {
                         console.error('Failed to load layer features:', e);
                         layer.loading = false;
                         self.updateLoadingState(layerName, false);
                     });
+            },
+
+            // Add vector tile layer from Martin
+            addVectorTileLayer: function(layerName) {
+                var layer = this.layers[layerName];
+                if (!layer) return;
+
+                var sourceId = 'layer-' + layerName;
+                var layerId = 'layer-' + layerName;
+
+                // Remove existing layers/source
+                this.removeLayerFromMap(layerName);
+
+                // Add vector tile source from Martin
+                this.map.addSource(sourceId, {
+                    type: 'vector',
+                    tiles: [this.martinUrl + '/' + layerName + '/{z}/{x}/{y}'],
+                    minzoom: 0,
+                    maxzoom: 14
+                });
+
+                // Add layer based on geometry type
+                var geometryType = layer.geometry_type.toLowerCase();
+
+                if (geometryType.indexOf('point') !== -1) {
+                    this.map.addLayer({
+                        id: layerId,
+                        type: 'circle',
+                        source: sourceId,
+                        'source-layer': layerName,
+                        paint: {
+                            'circle-radius': 5,
+                            'circle-color': layer.color,
+                            'circle-stroke-width': 1,
+                            'circle-stroke-color': '#ffffff'
+                        }
+                    });
+                } else if (geometryType.indexOf('line') !== -1) {
+                    this.map.addLayer({
+                        id: layerId,
+                        type: 'line',
+                        source: sourceId,
+                        'source-layer': layerName,
+                        paint: {
+                            'line-color': layer.color,
+                            'line-width': 2
+                        }
+                    });
+                } else if (geometryType.indexOf('polygon') !== -1) {
+                    // Add fill layer
+                    this.map.addLayer({
+                        id: layerId + '-fill',
+                        type: 'fill',
+                        source: sourceId,
+                        'source-layer': layerName,
+                        paint: {
+                            'fill-color': layer.color,
+                            'fill-opacity': 0.3
+                        }
+                    });
+                    // Add outline layer
+                    this.map.addLayer({
+                        id: layerId,
+                        type: 'line',
+                        source: sourceId,
+                        'source-layer': layerName,
+                        paint: {
+                            'line-color': layer.color,
+                            'line-width': 2
+                        }
+                    });
+                } else {
+                    // Default to circle
+                    this.map.addLayer({
+                        id: layerId,
+                        type: 'circle',
+                        source: sourceId,
+                        'source-layer': layerName,
+                        paint: {
+                            'circle-radius': 5,
+                            'circle-color': layer.color
+                        }
+                    });
+                }
             },
 
             // Update loading state in UI
@@ -3865,8 +4214,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 }
             },
 
-            // Add layer to map
-            addLayerToMap: function(layerName, geojson) {
+            // Add GeoJSON layer to map (fallback when Martin not available)
+            addGeoJSONLayer: function(layerName, geojson) {
                 var layer = this.layers[layerName];
                 if (!layer) return;
 
@@ -3955,8 +4304,11 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 }
             },
 
-            // Reload visible layers (debounced)
+            // Reload visible layers (debounced) - only for GeoJSON layers
             reloadVisibleLayers: function() {
+                // Skip reload when using Martin (vector tiles handle this automatically)
+                if (this.martinAvailable) return;
+
                 var self = this;
                 if (this.reloadDebounceTimer) {
                     clearTimeout(this.reloadDebounceTimer);
