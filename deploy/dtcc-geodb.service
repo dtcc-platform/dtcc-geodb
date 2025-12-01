@@ -1,0 +1,36 @@
+[Unit]
+Description=DTCC GeoDB Dashboard - PostGIS data publishing and management
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/dtcc-geodb
+Environment=PATH=/opt/dtcc-geodb/venv/bin:/usr/local/bin:/usr/bin
+EnvironmentFile=/opt/dtcc-geodb/.env
+
+# Use gunicorn for production
+ExecStart=/opt/dtcc-geodb/venv/bin/gunicorn \
+    --workers 4 \
+    --bind 127.0.0.1:5050 \
+    --timeout 300 \
+    --keep-alive 5 \
+    --access-logfile /var/log/dtcc-geodb/access.log \
+    --error-logfile /var/log/dtcc-geodb/error.log \
+    'src.lm_dtcc-geodb.management.server:create_management_app()'
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/dtcc-geodb/downloads /var/log/dtcc-geodb
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
