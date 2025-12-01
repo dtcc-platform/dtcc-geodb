@@ -37,7 +37,7 @@ DASHBOARD_PORT=${DASHBOARD_PORT:-5050}
 
 echo -e "\n${YELLOW}Installing system dependencies...${NC}"
 apt update
-apt install -y python3 python3-pip python3-venv postgresql postgresql-contrib postgis nginx curl
+apt install -y python3 python3-pip python3-venv postgresql postgresql-contrib postgis nginx curl certbot python3-certbot-nginx
 
 echo -e "\n${YELLOW}Installing Martin tile server...${NC}"
 if ! command -v martin &> /dev/null; then
