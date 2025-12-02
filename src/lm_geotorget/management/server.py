@@ -1841,7 +1841,7 @@ def generate_login_html(error: str = None) -> str:
         </div>
         <div class="login-card">
             {error_html}
-            <form method="POST" action="/login">
+            <form method="POST">
                 <div class="form-group">
                     <label for="username">Username</label>
                     <input type="text" id="username" name="username" placeholder="Enter username" required autofocus>
@@ -3223,7 +3223,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             <a href="https://dtcc.chalmers.se/partners">Partners</a>
             <a href="https://dtcc.chalmers.se/about">About</a>
             <a href="https://github.com/dtcc-platform">GitHub</a>
-            <a href="/logout" style="margin-left: 1rem; border-left: 1px solid rgba(255,255,255,0.2); padding-left: 2rem;">Logout</a>
+            <a href="logout" style="margin-left: 1rem; border-left: 1px solid rgba(255,255,255,0.2); padding-left: 2rem;">Logout</a>
         </nav>
     </header>
 
@@ -3349,6 +3349,13 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
     <script>
         var dbConnected = false;
         var currentDbConnection = null;
+        // Base path for API calls - automatically detect from current URL
+        var basePath = window.location.pathname.replace(/\/$/, '');
+        if (basePath === '') basePath = '';
+
+        function apiUrl(path) {
+            return basePath + path;
+        }
 
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -3359,7 +3366,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         }
 
         function savePackageName(orderId, packageName, inputElement) {
-            fetch('/api/orders/' + orderId + '/package-name', {
+            fetch(apiUrl('/api/orders/' + orderId + '/package-name'), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({package_name: packageName})
@@ -3444,7 +3451,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         }
 
         function checkDbStatus() {
-            fetch('/api/db/status')
+            fetch(apiUrl('/api/db/status'))
                 .then(function(resp) { return resp.json(); })
                 .then(function(data) {
                     var dot = document.getElementById('dbStatus');
@@ -3461,7 +3468,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         config.style.display = 'none';
                         connected.style.display = 'block';
                         // Fetch the connection string
-                        fetch('/api/config')
+                        fetch(apiUrl('/api/config'))
                             .then(function(r) { return r.json(); })
                             .then(function(cfg) {
                                 currentDbConnection = cfg.db_connection;
@@ -3491,7 +3498,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 return;
             }
 
-            fetch('/api/config', {
+            fetch(apiUrl('/api/config'), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({db_connection: conn})
@@ -3508,7 +3515,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         }
 
         function startMartin() {
-            fetch('/api/martin/start', { method: 'POST' })
+            fetch(apiUrl('/api/martin/start'), { method: 'POST' })
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     if (data.error) {
@@ -3525,7 +3532,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         }
 
         function checkMartinStatus() {
-            fetch('/api/martin/status')
+            fetch(apiUrl('/api/martin/status'))
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
                     var dot = document.getElementById('martinStatus');
@@ -3554,13 +3561,13 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 return;
             }
 
-            fetch('/api/config', {
+            fetch(apiUrl('/api/config'), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({db_connection: conn})
             })
             .then(function() {
-                return fetch('/api/db/init', {method: 'POST'});
+                return fetch(apiUrl('/api/db/init'), {method: 'POST'});
             })
             .then(function(resp) { return resp.json(); })
             .then(function(data) {
@@ -3609,7 +3616,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         }
 
         function loadOrders() {
-            fetch('/api/orders')
+            fetch(apiUrl('/api/orders'))
                 .then(function(resp) { return resp.json(); })
                 .then(function(orders) {
                     var grid = document.getElementById('ordersGrid');
@@ -3792,7 +3799,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
             addLogEntry('Starting publish for order: ' + orderId, 'info');
 
-            fetch('/api/orders/' + orderId + '/publish', {
+            fetch(apiUrl('/api/orders/' + orderId + '/publish'), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({})
@@ -3807,7 +3814,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 }
 
                 addLogEntry('Connected to progress stream', 'info');
-                var eventSource = new EventSource(data.progress_url);
+                var eventSource = new EventSource(apiUrl(data.progress_url));
 
                 eventSource.onmessage = function(event) {
                     var progress = JSON.parse(event.data);
@@ -3843,7 +3850,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         eventSource.close();
                         showCloseButton();
                         // Restart Martin to pick up new tables
-                        fetch('/api/martin/restart', { method: 'POST' })
+                        fetch(apiUrl('/api/martin/restart'), { method: 'POST' })
                             .then(function() {
                                 addLogEntry('Martin restarted for new layers', 'info');
                                 checkMartinStatus();
@@ -3893,7 +3900,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             btn.textContent = 'Checking...';
             btn.disabled = true;
 
-            fetch('/api/orders/' + orderId + '/check-updates')
+            fetch(apiUrl('/api/orders/' + orderId + '/check-updates'))
                 .then(function(resp) { return resp.json(); })
                 .then(function(data) {
                     if (data.error) {
@@ -3958,7 +3965,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
             addLogEntry('Starting update download for order: ' + orderId, 'info');
 
-            fetch('/api/download/' + orderId, {
+            fetch(apiUrl('/api/download/' + orderId), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({})
@@ -3973,7 +3980,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 }
 
                 addLogEntry('Connected to progress stream', 'info');
-                var eventSource = new EventSource(data.progress_url);
+                var eventSource = new EventSource(apiUrl(data.progress_url));
 
                 eventSource.onmessage = function(event) {
                     var progress = JSON.parse(event.data);
@@ -4073,7 +4080,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
             addLogEntry('Starting download for order: ' + orderId, 'info');
 
-            fetch('/api/download/' + orderId, {
+            fetch(apiUrl('/api/download/' + orderId), {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({})
@@ -4089,7 +4096,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 }
 
                 addLogEntry('Connected to progress stream', 'info');
-                var eventSource = new EventSource(data.progress_url);
+                var eventSource = new EventSource(apiUrl(data.progress_url));
 
                 eventSource.onmessage = function(event) {
                     var progress = JSON.parse(event.data);
@@ -4236,7 +4243,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             // Check Martin tile server status
             checkMartinStatus: function() {
                 var self = this;
-                fetch('/api/martin/status')
+                fetch(apiUrl('/api/martin/status'))
                     .then(function(resp) { return resp.json(); })
                     .then(function(data) {
                         self.martinAvailable = data.running;
@@ -4285,11 +4292,11 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             // Discover available layers from API
             discoverLayers: function() {
                 var self = this;
-                fetch('/api/layers')
+                fetch(apiUrl('/api/layers'))
                     .then(function(resp) { return resp.json(); })
                     .then(function(layers) {
                         var promises = layers.map(function(layerName) {
-                            return fetch('/api/layers/' + layerName)
+                            return fetch(apiUrl('/api/layers/' + layerName))
                                 .then(function(r) { return r.json(); })
                                 .then(function(info) {
                                     self.layers[layerName] = {
@@ -4442,7 +4449,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
                 // Request WGS84 output for map display, bbox in WGS84 needs conversion
                 // Use srid=4326 for both input bbox and output coordinates
-                fetch('/api/layers/' + layerName + '/features?bbox=' + bbox + '&limit=5000&srid=4326&bbox_srid=4326')
+                fetch(apiUrl('/api/layers/' + layerName + '/features?bbox=' + bbox + '&limit=5000&srid=4326&bbox_srid=4326'))
                     .then(function(resp) { return resp.json(); })
                     .then(function(geojson) {
                         layer.loading = false;
@@ -5234,7 +5241,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 var statusDiv = document.getElementById('lidarStatus');
 
                 // Find the first LiDAR on-demand order
-                fetch('/api/orders')
+                fetch(apiUrl('/api/orders'))
                     .then(function(r) { return r.json(); })
                     .then(function(orders) {
                         var lidarOrder = orders.find(function(o) {
@@ -5251,8 +5258,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
                         // Load both tiles and downloaded status
                         return Promise.all([
-                            fetch('/api/orders/' + self.orderId + '/lidar-tiles.geojson').then(function(r) { return r.json(); }),
-                            fetch('/api/orders/' + self.orderId + '/lidar-tiles/downloaded').then(function(r) { return r.json(); })
+                            fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles.geojson')).then(function(r) { return r.json(); }),
+                            fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles/downloaded')).then(function(r) { return r.json(); })
                         ]);
                     })
                     .then(function(results) {
@@ -5620,7 +5627,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
             loadContext: function() {
                 var self = this;
-                fetch('/api/chat/context')
+                fetch(apiUrl('/api/chat/context'))
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (data.error) {
@@ -5848,7 +5855,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             },
 
             executeSQL: async function(sql) {
-                var response = await fetch('/api/chat/query', {
+                var response = await fetch(apiUrl('/api/chat/query'), {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sql: sql })
