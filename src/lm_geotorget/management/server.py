@@ -36,7 +36,8 @@ def login_required(f):
         if not session.get('logged_in'):
             if request.is_json or request.path.startswith('/api/'):
                 return jsonify({'error': 'Authentication required'}), 401
-            return redirect(url_for('login'))
+            # Use relative redirect to work with any URL prefix
+            return redirect('login')
         return f(*args, **kwargs)
     return decorated_function
 
@@ -216,7 +217,8 @@ def create_management_app(
             if username == app.config['AUTH_USERNAME'] and password == app.config['AUTH_PASSWORD']:
                 session['logged_in'] = True
                 session['username'] = username
-                return redirect(url_for('dashboard'))
+                # Redirect to root (relative to current path)
+                return redirect('./')
             else:
                 return generate_login_html(error='Invalid username or password')
 
@@ -226,7 +228,7 @@ def create_management_app(
     def logout():
         """Logout and clear session."""
         session.clear()
-        return redirect(url_for('login'))
+        return redirect('login')
 
     # ==================== Dashboard ====================
 
@@ -1835,7 +1837,7 @@ def generate_login_html(error: str = None) -> str:
 <body>
     <div class="login-container">
         <div class="logo-section">
-            <img src="https://dtcc.chalmers.se/wp-content/uploads/2023/10/DTCC_white-e1697442498498.png" alt="DTCC Logo">
+            <img src="https://www.dtcc.chalmers.se/dtcc-logo.png" alt="DTCC Logo">
             <div class="logo-text">Digital Twin Cities Centre</div>
             <div class="app-title">GeoDB Dashboard</div>
         </div>
