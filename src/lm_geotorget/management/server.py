@@ -22,10 +22,23 @@ from typing import Optional
 from dataclasses import dataclass, asdict
 
 try:
-    from flask import Flask, request, jsonify, Response, stream_with_context
+    from flask import Flask, request, jsonify, Response, stream_with_context, session, redirect, url_for
+    from functools import wraps
     HAS_FLASK = True
 except ImportError:
     HAS_FLASK = False
+
+
+def login_required(f):
+    """Decorator to require login for routes."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 
 @dataclass
@@ -178,6 +191,11 @@ def create_management_app(
     app.config['db_connection'] = db_connection
     app.config['schema'] = schema
 
+    # Authentication config - can be set via environment variables
+    app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+    app.config['AUTH_USERNAME'] = os.environ.get('AUTH_USERNAME', 'admin')
+    app.config['AUTH_PASSWORD'] = os.environ.get('AUTH_PASSWORD', 'admin')
+
     # Store for SSE progress updates
     progress_queues: dict[str, queue.Queue] = {}
 
@@ -186,9 +204,34 @@ def create_management_app(
     if db_connection:
         martin_manager = MartinManager(db_connection)
 
+    # ==================== Authentication ====================
+
+    @app.route('/login', methods=['GET', 'POST'])
+    def login():
+        """Login page."""
+        if request.method == 'POST':
+            username = request.form.get('username', '')
+            password = request.form.get('password', '')
+
+            if username == app.config['AUTH_USERNAME'] and password == app.config['AUTH_PASSWORD']:
+                session['logged_in'] = True
+                session['username'] = username
+                return redirect(url_for('dashboard'))
+            else:
+                return generate_login_html(error='Invalid username or password')
+
+        return generate_login_html()
+
+    @app.route('/logout')
+    def logout():
+        """Logout and clear session."""
+        session.clear()
+        return redirect(url_for('login'))
+
     # ==================== Dashboard ====================
 
     @app.route('/')
+    @login_required
     def dashboard():
         """Serve the dashboard HTML."""
         dashboard_path = app.config['downloads_dir'].parent / 'dashboard.html'
@@ -197,6 +240,7 @@ def create_management_app(
         return generate_dashboard_html(app.config['downloads_dir'])
 
     @app.route('/api/config')
+    @login_required
     def get_config():
         """Get current configuration."""
         db_conn = app.config['db_connection']
@@ -216,6 +260,7 @@ def create_management_app(
         })
 
     @app.route('/api/config', methods=['POST'])
+    @login_required
     def set_config():
         """Update configuration."""
         nonlocal martin_manager
@@ -233,6 +278,7 @@ def create_management_app(
     # ==================== Orders ====================
 
     @app.route('/api/orders')
+    @login_required
     def list_orders():
         """List all downloaded orders with their status."""
         from ..tiling.processor import get_order_info
@@ -277,6 +323,7 @@ def create_management_app(
         return jsonify(orders)
 
     @app.route('/api/orders/<order_id>')
+    @login_required
     def get_order(order_id: str):
         """Get detailed info for a single order."""
         from ..tiling.processor import get_order_info
@@ -308,6 +355,7 @@ def create_management_app(
             return jsonify({'error': str(e)}), 500
 
     @app.route('/api/orders/<order_id>/package-name', methods=['POST'])
+    @login_required
     def set_package_name(order_id: str):
         """Set the LM package name for an order."""
         order_dir = app.config['downloads_dir'] / order_id
@@ -324,6 +372,7 @@ def create_management_app(
             return jsonify({'error': str(e)}), 500
 
     @app.route('/api/orders/<order_id>/check-updates')
+    @login_required
     def check_order_updates(order_id: str):
         """
         Check if there are updates available for an order.
@@ -347,6 +396,7 @@ def create_management_app(
     # ==================== Download ====================
 
     @app.route('/api/download/<order_id>', methods=['POST'])
+    @login_required
     def start_download(order_id: str):
         """
         Start downloading an order.
@@ -376,6 +426,7 @@ def create_management_app(
         })
 
     @app.route('/api/download/<order_id>/progress')
+    @login_required
     def download_progress(order_id: str):
         """SSE endpoint for download progress updates."""
         queue_key = f"download_{order_id}"
@@ -412,6 +463,7 @@ def create_management_app(
     # ==================== Publish ====================
 
     @app.route('/api/orders/<order_id>/publish', methods=['POST'])
+    @login_required
     def publish_order(order_id: str):
         """
         Publish an order to PostGIS.
@@ -457,6 +509,7 @@ def create_management_app(
         })
 
     @app.route('/api/orders/<order_id>/publish/progress')
+    @login_required
     def publish_progress(order_id: str):
         """SSE endpoint for publish progress updates."""
         def generate():
@@ -490,6 +543,7 @@ def create_management_app(
     # ==================== LiDAR Tiles (On-Demand) ====================
 
     @app.route('/api/orders/<order_id>/lidar-tiles')
+    @login_required
     def get_lidar_tiles_api(order_id: str):
         """Get LiDAR tiles for an on-demand order."""
         from ..tiling.processor import get_lidar_tiles
@@ -506,6 +560,7 @@ def create_management_app(
         })
 
     @app.route('/api/orders/<order_id>/lidar-tiles.geojson')
+    @login_required
     def get_lidar_tiles_geojson_api(order_id: str):
         """Get LiDAR tiles as GeoJSON for map display."""
         from ..tiling.processor import get_lidar_tiles_geojson
@@ -518,6 +573,7 @@ def create_management_app(
         return jsonify(geojson)
 
     @app.route('/api/orders/<order_id>/lidar-tiles/downloaded')
+    @login_required
     def get_downloaded_tiles(order_id: str):
         """Get list of already downloaded LiDAR tiles."""
         order_dir = app.config['downloads_dir'] / order_id
@@ -537,6 +593,7 @@ def create_management_app(
         })
 
     @app.route('/api/orders/<order_id>/lidar-tiles/<tile_name>/download', methods=['GET', 'POST'])
+    @login_required
     def download_lidar_tile(order_id: str, tile_name: str):
         """
         GET: Get info about a tile
@@ -614,6 +671,7 @@ def create_management_app(
         )
 
     @app.route('/api/orders/<order_id>/lidar-tiles/<tile_name>/file')
+    @login_required
     def serve_lidar_tile(order_id: str, tile_name: str):
         """Serve a downloaded LiDAR tile file."""
         from flask import send_file
@@ -638,6 +696,7 @@ def create_management_app(
     # ==================== Martin Tile Server ====================
 
     @app.route('/api/martin/status')
+    @login_required
     def martin_status():
         """Get Martin server status."""
         nonlocal martin_manager
@@ -670,6 +729,7 @@ def create_management_app(
         })
 
     @app.route('/api/martin/start', methods=['POST'])
+    @login_required
     def start_martin():
         """Start Martin server."""
         nonlocal martin_manager
@@ -700,6 +760,7 @@ def create_management_app(
             return jsonify({'error': 'Failed to start Martin. Check logs for details.'}), 500
 
     @app.route('/api/martin/stop', methods=['POST'])
+    @login_required
     def stop_martin():
         """Stop Martin server."""
         nonlocal martin_manager
@@ -710,6 +771,7 @@ def create_management_app(
         return jsonify({'status': 'not_running'})
 
     @app.route('/api/martin/restart', methods=['POST'])
+    @login_required
     def restart_martin():
         """Restart Martin server to pick up new tables."""
         nonlocal martin_manager
@@ -738,6 +800,7 @@ def create_management_app(
     # ==================== Database Status ====================
 
     @app.route('/api/db/status')
+    @login_required
     def db_status():
         """Get PostGIS database status."""
         if not app.config['db_connection']:
@@ -789,6 +852,7 @@ def create_management_app(
             })
 
     @app.route('/api/db/init', methods=['POST'])
+    @login_required
     def init_db():
         """Initialize the PostGIS database."""
         if not app.config['db_connection']:
@@ -816,6 +880,7 @@ def create_management_app(
     # ==================== Layers API ====================
 
     @app.route('/api/layers')
+    @login_required
     def list_layers_api():
         """List all available layers."""
         if not app.config['db_connection']:
@@ -840,6 +905,7 @@ def create_management_app(
             return jsonify({'error': str(e)}), 500
 
     @app.route('/api/layers/<layer_name>')
+    @login_required
     def get_layer_info_api(layer_name: str):
         """Get detailed information about a layer."""
         if not app.config['db_connection']:
@@ -886,6 +952,7 @@ def create_management_app(
             return jsonify({'error': str(e)}), 500
 
     @app.route('/api/layers/<layer_name>/features')
+    @login_required
     def get_layer_features_api(layer_name: str):
         """Query features from a layer.
 
@@ -978,6 +1045,7 @@ def create_management_app(
     # ==================== Chat API ====================
 
     @app.route('/api/chat/context')
+    @login_required
     def get_chat_context():
         """Return database context for Claude's system prompt."""
         if not app.config['db_connection']:
@@ -1067,6 +1135,7 @@ def create_management_app(
             return jsonify({'error': str(e)}), 500
 
     @app.route('/api/chat/query', methods=['POST'])
+    @login_required
     def execute_chat_query():
         """Execute validated read-only SQL query."""
         import re
@@ -1626,6 +1695,167 @@ def check_for_updates(order_id: str, order_dir: Path) -> dict:
             pass
 
     return result
+
+
+def generate_login_html(error: str = None) -> str:
+    """Generate login page HTML with DTCC styling."""
+    error_html = ''
+    if error:
+        error_html = f'<div class="error-message">{error}</div>'
+
+    return f'''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - DTCC GeoDB</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;600;700&display=swap');
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        :root {{
+            --gold: #FADA36;
+            --gold-dim: rgba(250, 218, 54, 0.2);
+            --gold-subtle: rgba(250, 218, 54, 0.1);
+            --dark-bg: #101016;
+            --dark-secondary: #1b1b22;
+            --dark-card: rgba(255, 255, 255, 0.05);
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --text-primary: #ffffff;
+            --text-secondary: rgba(255, 255, 255, 0.5);
+            --text-dim: rgba(255, 255, 255, 0.35);
+            --red: #f56565;
+        }}
+        body {{
+            font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(180deg, var(--dark-bg) 0%, var(--dark-secondary) 100%);
+            min-height: 100vh;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .login-container {{
+            width: 100%;
+            max-width: 400px;
+            padding: 2rem;
+        }}
+        .logo-section {{
+            text-align: center;
+            margin-bottom: 2rem;
+        }}
+        .logo-section img {{
+            height: 48px;
+            width: auto;
+            margin-bottom: 1rem;
+        }}
+        .logo-text {{
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+        }}
+        .app-title {{
+            color: var(--gold);
+            font-size: 1.5rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }}
+        .login-card {{
+            background: var(--dark-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            padding: 2rem;
+            backdrop-filter: blur(12px);
+        }}
+        .form-group {{
+            margin-bottom: 1.25rem;
+        }}
+        .form-group label {{
+            display: block;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }}
+        .form-group input {{
+            width: 100%;
+            padding: 0.875rem 1rem;
+            border: 1px solid var(--border-subtle);
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            background: var(--dark-bg);
+            color: var(--text-primary);
+            transition: border-color 0.2s;
+        }}
+        .form-group input::placeholder {{
+            color: var(--text-dim);
+        }}
+        .form-group input:focus {{
+            outline: none;
+            border-color: var(--gold);
+        }}
+        .login-btn {{
+            width: 100%;
+            padding: 0.875rem 1.5rem;
+            background: var(--gold);
+            color: var(--dark-bg);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            transition: all 0.2s;
+            margin-top: 0.5rem;
+        }}
+        .login-btn:hover {{
+            opacity: 0.9;
+            transform: translateY(-1px);
+        }}
+        .error-message {{
+            background: rgba(245, 101, 101, 0.1);
+            border: 1px solid var(--red);
+            color: var(--red);
+            padding: 0.75rem 1rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            margin-bottom: 1.25rem;
+            text-align: center;
+        }}
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="logo-section">
+            <img src="https://dtcc.chalmers.se/wp-content/uploads/2023/10/DTCC_white-e1697442498498.png" alt="DTCC Logo">
+            <div class="logo-text">Digital Twin Cities Centre</div>
+            <div class="app-title">GeoDB Dashboard</div>
+        </div>
+        <div class="login-card">
+            {error_html}
+            <form method="POST" action="/login">
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <input type="text" id="username" name="username" placeholder="Enter username" required autofocus>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <input type="password" id="password" name="password" placeholder="Enter password" required>
+                </div>
+                <button type="submit" class="login-btn">Sign In</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>'''
 
 
 def generate_dashboard_html(downloads_dir: Path) -> str:
@@ -2993,6 +3223,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             <a href="https://dtcc.chalmers.se/partners">Partners</a>
             <a href="https://dtcc.chalmers.se/about">About</a>
             <a href="https://github.com/dtcc-platform">GitHub</a>
+            <a href="/logout" style="margin-left: 1rem; border-left: 1px solid rgba(255,255,255,0.2); padding-left: 2rem;">Logout</a>
         </nav>
     </header>
 
