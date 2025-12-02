@@ -118,14 +118,27 @@ class MartinManager:
             self.process = None
 
     def is_running(self) -> bool:
-        """Check if Martin is running by testing the port."""
-        import socket
+        """Check if Martin is running by making an HTTP request."""
+        import urllib.request
+        import urllib.error
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex(('127.0.0.1', self.port))
-            sock.close()
-            return result == 0
+            req = urllib.request.Request(
+                f'http://127.0.0.1:{self.port}/health',
+                method='GET'
+            )
+            with urllib.request.urlopen(req, timeout=2) as response:
+                return response.status == 200
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ConnectionRefusedError):
+            # Try the catalog endpoint as fallback (older Martin versions)
+            try:
+                req = urllib.request.Request(
+                    f'http://127.0.0.1:{self.port}/catalog',
+                    method='GET'
+                )
+                with urllib.request.urlopen(req, timeout=2) as response:
+                    return response.status == 200
+            except Exception:
+                return False
         except Exception:
             return False
 
