@@ -695,6 +695,485 @@ def create_management_app(
             download_name=tile_name
         )
 
+    # ==================== Potree 3D Point Cloud Viewer ====================
+
+    # Track active Potree conversions
+    potree_conversion_queues: dict[str, queue.Queue] = {}
+    potree_conversion_active: dict[str, bool] = {}
+
+    @app.route('/api/orders/<order_id>/potree/status')
+    @login_required
+    def potree_status(order_id: str):
+        """Get Potree converter status and installation info."""
+        from ..tiling.potree_converter import PotreeConverter
+
+        converter = PotreeConverter()
+        return jsonify({
+            'installed': converter.is_installed(),
+            'version': converter.get_version(),
+            'install_url': 'https://github.com/potree/PotreeConverter'
+        })
+
+    @app.route('/api/orders/<order_id>/potree/converted')
+    @login_required
+    def get_potree_converted(order_id: str):
+        """Get list of tiles converted to Potree format."""
+        from ..tiling.potree_converter import PotreeConverter
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        converted = PotreeConverter.get_converted_tiles(order_dir)
+        return jsonify({
+            'order_id': order_id,
+            'converted': converted,
+            'count': len(converted)
+        })
+
+    @app.route('/api/orders/<order_id>/potree/convert', methods=['POST'])
+    @login_required
+    def start_potree_conversion(order_id: str):
+        """Start converting LAZ tiles to Potree format."""
+        from ..tiling.potree_converter import PotreeConverter
+
+        # Check if already converting
+        if potree_conversion_active.get(order_id):
+            return jsonify({'error': 'Conversion already in progress'}), 409
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        # Check PotreeConverter installation
+        converter = PotreeConverter()
+        if not converter.is_installed():
+            return jsonify({
+                'error': 'PotreeConverter not installed',
+                'install_url': 'https://github.com/potree/PotreeConverter'
+            }), 400
+
+        # Get tiles to convert from request body
+        data = request.get_json() or {}
+        tile_names = data.get('tiles', [])
+
+        if not tile_names:
+            return jsonify({'error': 'No tiles specified'}), 400
+
+        # Verify all tiles exist
+        tiles_dir = order_dir / 'tiles'
+        missing = [t for t in tile_names if not (tiles_dir / t).exists()]
+        if missing:
+            return jsonify({'error': f'Tiles not found: {missing}'}), 404
+
+        # Create progress queue
+        progress_queue: queue.Queue = queue.Queue()
+        potree_conversion_queues[order_id] = progress_queue
+        potree_conversion_active[order_id] = True
+
+        def conversion_thread():
+            try:
+                def progress_callback(status, done, total, current_tile):
+                    progress_queue.put({
+                        'order_id': order_id,
+                        'status': status,
+                        'current_tile': current_tile,
+                        'tiles_done': done,
+                        'tiles_total': total
+                    })
+
+                result = converter.convert_tiles(
+                    order_dir,
+                    tile_names,
+                    progress_callback=progress_callback
+                )
+
+                # Send completion
+                progress_queue.put({
+                    'order_id': order_id,
+                    'status': 'completed',
+                    'tiles_done': result.succeeded,
+                    'tiles_total': result.total,
+                    'failed': result.failed,
+                    'results': [
+                        {'tile': r.tile_name, 'success': r.success, 'error': r.error}
+                        for r in result.results
+                    ]
+                })
+            except Exception as e:
+                progress_queue.put({
+                    'order_id': order_id,
+                    'status': 'error',
+                    'error': str(e)
+                })
+            finally:
+                potree_conversion_active[order_id] = False
+
+        thread = threading.Thread(target=conversion_thread, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'status': 'started',
+            'tiles': tile_names,
+            'count': len(tile_names)
+        })
+
+    @app.route('/api/orders/<order_id>/potree/convert/progress')
+    @login_required
+    def potree_conversion_progress(order_id: str):
+        """SSE endpoint for Potree conversion progress."""
+        progress_queue = potree_conversion_queues.get(order_id)
+
+        if not progress_queue and not potree_conversion_active.get(order_id):
+            return jsonify({'error': 'No active conversion'}), 404
+
+        def generate():
+            last_keepalive = time.time()
+            while True:
+                try:
+                    progress = progress_queue.get(timeout=1.0)
+                    yield f"data: {json.dumps(progress)}\n\n"
+
+                    if progress.get('status') in ('completed', 'error'):
+                        # Cleanup
+                        potree_conversion_queues.pop(order_id, None)
+                        break
+                except queue.Empty:
+                    # Send keepalive every 15 seconds
+                    if time.time() - last_keepalive > 15:
+                        yield f"data: {json.dumps({'keepalive': True})}\n\n"
+                        last_keepalive = time.time()
+
+                    # Check if conversion is still active
+                    if not potree_conversion_active.get(order_id):
+                        break
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no'
+            }
+        )
+
+    @app.route('/api/orders/<order_id>/potree/<path:potree_path>')
+    @login_required
+    def serve_potree_file(order_id: str, potree_path: str):
+        """Serve Potree data files (cloud.js, metadata.json, *.bin)."""
+        from flask import send_file
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        potree_dir = order_dir / 'potree'
+        file_path = potree_dir / potree_path
+
+        # Security: ensure path is within potree directory
+        try:
+            file_path.resolve().relative_to(potree_dir.resolve())
+        except ValueError:
+            return jsonify({'error': 'Invalid path'}), 403
+
+        if not file_path.exists():
+            return jsonify({'error': 'File not found'}), 404
+
+        # Determine MIME type
+        suffix = file_path.suffix.lower()
+        mime_types = {
+            '.json': 'application/json',
+            '.js': 'application/javascript',
+            '.bin': 'application/octet-stream',
+        }
+        mimetype = mime_types.get(suffix, 'application/octet-stream')
+
+        return send_file(file_path, mimetype=mimetype)
+
+    @app.route('/viewer3d/<order_id>')
+    @login_required
+    def viewer3d(order_id: str):
+        """3D point cloud viewer using Potree."""
+        from ..tiling.potree_converter import PotreeConverter
+
+        order_dir = app.config['downloads_dir'] / order_id
+        if not order_dir.exists():
+            return jsonify({'error': 'Order not found'}), 404
+
+        converted = PotreeConverter.get_converted_tiles(order_dir)
+        converted_json = json.dumps(converted)
+
+        # Note: order_id is a UUID from our file system, converted_json contains
+        # tile names from our file system - both are server-controlled, not user input
+        return f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>3D Point Cloud Viewer</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/potree-core@1.1.0/potree.css">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #fff;
+            overflow: hidden;
+        }}
+        #potree_container {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }}
+        .header {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 12px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+        }}
+        .header h1 {{
+            font-size: 1.1rem;
+            font-weight: 500;
+        }}
+        .header a {{
+            color: #ffd700;
+            text-decoration: none;
+        }}
+        .header a:hover {{
+            text-decoration: underline;
+        }}
+        .tile-list {{
+            position: absolute;
+            top: 60px;
+            right: 20px;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 1000;
+            max-height: 300px;
+            overflow-y: auto;
+            min-width: 200px;
+        }}
+        .tile-list h3 {{
+            font-size: 0.9rem;
+            margin-bottom: 10px;
+            color: #ffd700;
+        }}
+        .tile-item {{
+            font-size: 0.8rem;
+            padding: 5px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }}
+        .tile-item:last-child {{
+            border-bottom: none;
+        }}
+        .tile-status {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #888;
+        }}
+        .tile-status.loading {{
+            background: #ff9800;
+            animation: pulse 1s infinite;
+        }}
+        .tile-status.loaded {{
+            background: #4caf50;
+        }}
+        .tile-status.error {{
+            background: #f44336;
+        }}
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.5; }}
+        }}
+        .loading-overlay {{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            z-index: 999;
+        }}
+        .loading-spinner {{
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(255,215,0,0.3);
+            border-top-color: #ffd700;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }}
+        @keyframes spin {{
+            to {{ transform: rotate(360deg); }}
+        }}
+        .no-tiles {{
+            text-align: center;
+        }}
+        .no-tiles h2 {{
+            color: #ffd700;
+            margin-bottom: 10px;
+        }}
+    </style>
+</head>
+<body>
+    <div id="potree_container"></div>
+
+    <div class="header">
+        <h1>3D Point Cloud Viewer</h1>
+        <a href="javascript:history.back()">Back to Dashboard</a>
+    </div>
+
+    <div class="tile-list" id="tileList">
+        <h3>Loaded Tiles</h3>
+        <div id="tileItems"></div>
+    </div>
+
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <p style="margin-top: 15px;">Loading point clouds...</p>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/potree-core@1.1.0/potree.js"></script>
+    <script>
+        (function() {{
+            var orderId = {json.dumps(order_id)};
+            var convertedTiles = {converted_json};
+            var loadedCount = 0;
+            var tileStatus = {{}};
+
+            function updateTileStatus(tileName, status) {{
+                tileStatus[tileName] = status;
+                var itemEl = document.getElementById('tile-' + tileName);
+                if (itemEl) {{
+                    var statusEl = itemEl.querySelector('.tile-status');
+                    statusEl.className = 'tile-status ' + status;
+                }}
+            }}
+
+            function createTileItem(tileName) {{
+                var div = document.createElement('div');
+                div.className = 'tile-item';
+                div.id = 'tile-' + tileName;
+
+                var statusDiv = document.createElement('div');
+                statusDiv.className = 'tile-status loading';
+
+                var nameSpan = document.createElement('span');
+                nameSpan.textContent = tileName;
+
+                div.appendChild(statusDiv);
+                div.appendChild(nameSpan);
+                return div;
+            }}
+
+            function showMessage(title, text) {{
+                var overlay = document.getElementById('loadingOverlay');
+                while (overlay.firstChild) {{
+                    overlay.removeChild(overlay.firstChild);
+                }}
+                var container = document.createElement('div');
+                container.className = 'no-tiles';
+
+                var h2 = document.createElement('h2');
+                h2.textContent = title;
+
+                var p = document.createElement('p');
+                p.textContent = text;
+
+                container.appendChild(h2);
+                container.appendChild(p);
+                overlay.appendChild(container);
+            }}
+
+            function initViewer() {{
+                var container = document.getElementById('potree_container');
+                var loadingOverlay = document.getElementById('loadingOverlay');
+                var tileItems = document.getElementById('tileItems');
+
+                if (convertedTiles.length === 0) {{
+                    showMessage('No converted tiles', 'Go back to the dashboard and convert some tiles first.');
+                    return;
+                }}
+
+                // Create tile list using safe DOM methods
+                convertedTiles.forEach(function(tile) {{
+                    var item = createTileItem(tile.tile_name);
+                    tileItems.appendChild(item);
+                    tileStatus[tile.tile_name] = 'loading';
+                }});
+
+                // Check if Potree is available
+                if (typeof Potree === 'undefined') {{
+                    showMessage('Error', 'Could not load Potree library.');
+                    return;
+                }}
+
+                // Initialize Potree viewer
+                var viewer = new Potree.Viewer(container);
+                viewer.setEDLEnabled(true);
+                viewer.setFOV(60);
+                viewer.setPointBudget(2000000);
+                viewer.setBackground('gradient');
+
+                // Load each tile
+                var baseUrl = window.location.origin;
+                convertedTiles.forEach(function(tile) {{
+                    var pointCloudUrl = baseUrl + '/api/orders/' + orderId + '/potree/' + tile.tile_name + '/metadata.json';
+
+                    Potree.loadPointCloud(pointCloudUrl, tile.tile_name, function(e) {{
+                        if (e.pointcloud) {{
+                            viewer.scene.addPointCloud(e.pointcloud);
+                            updateTileStatus(tile.tile_name, 'loaded');
+                            loadedCount++;
+
+                            if (loadedCount === convertedTiles.length) {{
+                                loadingOverlay.style.display = 'none';
+                                viewer.fitToScreen();
+                            }}
+                        }} else {{
+                            updateTileStatus(tile.tile_name, 'error');
+                            loadedCount++;
+                            if (loadedCount === convertedTiles.length) {{
+                                loadingOverlay.style.display = 'none';
+                            }}
+                        }}
+                    }});
+                }});
+
+                // Animation loop
+                function animate() {{
+                    requestAnimationFrame(animate);
+                    viewer.update();
+                    viewer.render();
+                }}
+                animate();
+            }}
+
+            // Initialize when DOM is ready
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', initViewer);
+            }} else {{
+                initViewer();
+            }}
+        }})();
+    </script>
+</body>
+</html>'''
+
     # ==================== Martin Tile Server ====================
 
     @app.route('/api/martin/status')
@@ -3212,6 +3691,59 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             margin-top: 4px;
             text-align: center;
         }
+
+        /* 3D Viewer Controls */
+        .lidar-3d-controls {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        .btn-3d {
+            padding: 6px 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background: #2196F3;
+            color: white;
+            transition: background 0.2s, opacity 0.2s;
+        }
+        .btn-3d:hover:not(:disabled) {
+            background: #1976D2;
+        }
+        .btn-3d:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn-3d.btn-view {
+            background: #9C27B0;
+        }
+        .btn-3d.btn-view:hover:not(:disabled) {
+            background: #7B1FA2;
+        }
+        .lidar-popup .select-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--border-subtle);
+        }
+        .lidar-popup .select-row input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: #2196F3;
+        }
+        .lidar-popup .select-row label {
+            font-size: 12px;
+            color: var(--text-primary);
+            cursor: pointer;
+        }
+        .lidar-popup .status-converted {
+            color: #2196F3;
+            font-weight: 500;
+        }
     </style>
 </head>
 <body>
@@ -3303,6 +3835,15 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         <label for="lidarToggle">LiDAR Tiles</label>
                     </div>
                     <div class="lidar-status" id="lidarStatus"></div>
+                    <div class="lidar-3d-controls" id="lidar3dControls" style="display: none; margin-top: 0.5rem;">
+                        <button class="btn-3d" id="prepare3dBtn" onclick="LidarViewer.startConversion()" disabled>
+                            Prepare for 3D (<span id="selectedCount">0</span>)
+                        </button>
+                        <button class="btn-3d btn-view" id="view3dBtn" onclick="LidarViewer.openViewer3d()" disabled>
+                            View in 3D
+                        </button>
+                    </div>
+                    <div class="lidar-3d-status" id="lidar3dStatus" style="font-size: 0.75rem; color: #888; margin-top: 0.25rem;"></div>
                 </div>
             </div>
             <div class="split-right">
@@ -5219,6 +5760,10 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             handlersAdded: false,
             downloadedTiles: {},
             downloading: {},
+            // 3D viewer properties
+            selectedTiles: {},
+            convertedTiles: {},
+            converting: false,
 
             init: function() {
                 var self = this;
@@ -5258,16 +5803,18 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         self.orderId = lidarOrder.order_id;
                         if (statusDiv) statusDiv.textContent = 'Loading tiles...';
 
-                        // Load both tiles and downloaded status
+                        // Load tiles, downloaded status, and converted status
                         return Promise.all([
                             fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles.geojson')).then(function(r) { return r.json(); }),
-                            fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles/downloaded')).then(function(r) { return r.json(); })
+                            fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles/downloaded')).then(function(r) { return r.json(); }),
+                            fetch(apiUrl('/api/orders/' + self.orderId + '/potree/converted')).then(function(r) { return r.json(); })
                         ]);
                     })
                     .then(function(results) {
                         if (!results) return;
                         var geojson = results[0];
                         var downloaded = results[1];
+                        var converted = results[2];
 
                         // Mark downloaded tiles
                         self.downloadedTiles = {};
@@ -5277,17 +5824,34 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                             });
                         }
 
-                        // Add downloaded property to each feature
+                        // Mark converted tiles
+                        self.convertedTiles = {};
+                        if (converted && converted.converted) {
+                            converted.converted.forEach(function(t) {
+                                self.convertedTiles[t.laz_name] = true;
+                            });
+                        }
+
+                        // Add downloaded and converted properties to each feature
                         geojson.features.forEach(function(f) {
-                            f.properties.downloaded = self.downloadedTiles[f.properties.filename] ? 1 : 0;
+                            var filename = f.properties.filename;
+                            f.properties.downloaded = self.downloadedTiles[filename] ? 1 : 0;
+                            f.properties.converted = self.convertedTiles[filename] ? 1 : 0;
                         });
 
                         self.tiles = geojson;
                         self.renderTiles();
+                        self.update3dControls();
 
                         var downloadedCount = Object.keys(self.downloadedTiles).length;
+                        var convertedCount = Object.keys(self.convertedTiles).length;
                         if (statusDiv) {
-                            statusDiv.textContent = geojson.features.length + ' tiles (' + downloadedCount + ' downloaded)';
+                            var status = geojson.features.length + ' tiles (' + downloadedCount + ' downloaded';
+                            if (convertedCount > 0) {
+                                status += ', ' + convertedCount + ' ready for 3D';
+                            }
+                            status += ')';
+                            statusDiv.textContent = status;
                         }
                     })
                     .catch(function(err) {
@@ -5319,7 +5883,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     data: this.tiles
                 });
 
-                // Add fill layer with color based on downloaded status
+                // Add fill layer with color based on status:
+                // Blue = converted to Potree, Green = downloaded, Pink = not downloaded
                 map.addLayer({
                     id: 'lidar-tiles-fill',
                     type: 'fill',
@@ -5327,6 +5892,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     paint: {
                         'fill-color': [
                             'case',
+                            ['==', ['get', 'converted'], 1],
+                            '#2196F3',  // Blue for converted to Potree
                             ['==', ['get', 'downloaded'], 1],
                             '#4CAF50',  // Green for downloaded
                             '#E91E63'   // Pink for not downloaded
@@ -5343,6 +5910,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     paint: {
                         'line-color': [
                             'case',
+                            ['==', ['get', 'converted'], 1],
+                            '#2196F3',
                             ['==', ['get', 'downloaded'], 1],
                             '#4CAF50',
                             '#E91E63'
@@ -5362,14 +5931,40 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         var props = feature.properties;
                         var isDownloaded = self.downloadedTiles[props.filename];
                         var isDownloading = self.downloading[props.filename];
+                        var isConverted = self.convertedTiles[props.filename];
+                        var isSelected = self.selectedTiles[props.filename];
 
+                        // Status text
+                        var statusText;
+                        if (isConverted) {
+                            statusText = '<span class="status-converted">Ready for 3D</span>';
+                        } else if (isDownloaded) {
+                            statusText = 'Downloaded';
+                        } else {
+                            statusText = 'Not downloaded';
+                        }
+
+                        // Action button
                         var btnHtml;
-                        if (isDownloaded) {
+                        if (isConverted) {
+                            btnHtml = '<span class="download-btn" style="background: #2196F3; cursor: default;">Converted</span>';
+                        } else if (isDownloaded) {
                             btnHtml = '<span class="download-btn" style="background: #4CAF50; cursor: default;">Downloaded</span>';
                         } else if (isDownloading) {
                             btnHtml = '<span class="download-btn" style="background: #FF9800; cursor: wait;">Downloading...</span>';
                         } else {
                             btnHtml = '<a class="download-btn" href="#" onclick="LidarViewer.downloadTile(\\'' + props.filename + '\\'); return false;">Download Tile</a>';
+                        }
+
+                        // Selection checkbox (only for downloaded but not converted tiles)
+                        var selectHtml = '';
+                        if (isDownloaded && !isConverted) {
+                            var checked = isSelected ? 'checked' : '';
+                            selectHtml = '<div class="select-row">' +
+                                '<input type="checkbox" id="select-' + props.filename + '" ' + checked + ' ' +
+                                'onchange="LidarViewer.toggleTileSelection(\\'' + props.filename + '\\')">' +
+                                '<label for="select-' + props.filename + '">Select for 3D conversion</label>' +
+                                '</div>';
                         }
 
                         var html = '<div class="lidar-popup">' +
@@ -5382,9 +5977,10 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                             '<span class="lidar-label">Grid:</span>' +
                             '<span class="lidar-value">' + props.grid_x + ', ' + props.grid_y + ' km</span>' +
                             '<span class="lidar-label">Status:</span>' +
-                            '<span class="lidar-value">' + (isDownloaded ? 'Downloaded' : 'Not downloaded') + '</span>' +
+                            '<span class="lidar-value">' + statusText + '</span>' +
                             '</div>' +
                             btnHtml +
+                            selectHtml +
                             '</div>';
 
                         new maplibregl.Popup()
@@ -5565,6 +6161,175 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     map.removeSource('lidar-tiles');
                 }
                 this.tiles = null;
+            },
+
+            // ==================== 3D Viewer Methods ====================
+
+            toggleTileSelection: function(filename) {
+                if (this.selectedTiles[filename]) {
+                    delete this.selectedTiles[filename];
+                } else {
+                    this.selectedTiles[filename] = true;
+                }
+                this.update3dControls();
+            },
+
+            update3dControls: function() {
+                var controlsDiv = document.getElementById('lidar3dControls');
+                var prepareBtn = document.getElementById('prepare3dBtn');
+                var viewBtn = document.getElementById('view3dBtn');
+                var selectedCountSpan = document.getElementById('selectedCount');
+                var statusDiv = document.getElementById('lidar3dStatus');
+
+                if (!controlsDiv) return;
+
+                // Show controls only when LiDAR is enabled
+                controlsDiv.style.display = this.enabled ? 'flex' : 'none';
+
+                // Update selected count
+                var selectedCount = Object.keys(this.selectedTiles).length;
+                if (selectedCountSpan) {
+                    selectedCountSpan.textContent = selectedCount;
+                }
+
+                // Enable/disable prepare button
+                if (prepareBtn) {
+                    prepareBtn.disabled = selectedCount === 0 || this.converting;
+                }
+
+                // Enable view button if there are converted tiles
+                var convertedCount = Object.keys(this.convertedTiles).length;
+                if (viewBtn) {
+                    viewBtn.disabled = convertedCount === 0;
+                }
+
+                // Update status
+                if (statusDiv && convertedCount > 0) {
+                    statusDiv.textContent = convertedCount + ' tile(s) ready for 3D viewing';
+                }
+            },
+
+            startConversion: function() {
+                var self = this;
+                var selectedTiles = Object.keys(this.selectedTiles);
+
+                if (selectedTiles.length === 0) {
+                    alert('Please select tiles to convert');
+                    return;
+                }
+
+                if (this.converting) {
+                    alert('Conversion already in progress');
+                    return;
+                }
+
+                this.converting = true;
+                this.update3dControls();
+
+                var statusDiv = document.getElementById('lidar3dStatus');
+                if (statusDiv) {
+                    statusDiv.textContent = 'Starting conversion...';
+                }
+
+                // Start conversion
+                fetch(apiUrl('/api/orders/' + this.orderId + '/potree/convert'), {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({tiles: selectedTiles})
+                })
+                .then(function(response) {
+                    if (!response.ok) {
+                        return response.json().then(function(data) {
+                            throw new Error(data.error || 'Conversion failed');
+                        });
+                    }
+                    return response.json();
+                })
+                .then(function(data) {
+                    // Connect to progress stream
+                    self.connectToConversionProgress();
+                })
+                .catch(function(err) {
+                    self.converting = false;
+                    self.update3dControls();
+                    if (statusDiv) {
+                        statusDiv.textContent = 'Conversion failed: ' + err.message;
+                    }
+                    alert('Conversion failed: ' + err.message);
+                });
+            },
+
+            connectToConversionProgress: function() {
+                var self = this;
+                var statusDiv = document.getElementById('lidar3dStatus');
+
+                var eventSource = new EventSource(apiUrl('/api/orders/' + this.orderId + '/potree/convert/progress'));
+
+                eventSource.onmessage = function(event) {
+                    var data = JSON.parse(event.data);
+
+                    if (data.keepalive) return;
+
+                    if (data.status === 'converting') {
+                        if (statusDiv) {
+                            statusDiv.textContent = 'Converting tile ' + (data.tiles_done + 1) + ' of ' + data.tiles_total + ': ' + data.current_tile;
+                        }
+                    } else if (data.status === 'completed') {
+                        eventSource.close();
+                        self.converting = false;
+
+                        // Clear selection and reload tiles
+                        self.selectedTiles = {};
+                        self.loadTiles();
+
+                        if (statusDiv) {
+                            statusDiv.textContent = 'Conversion complete! ' + data.tiles_done + ' tile(s) converted.';
+                        }
+
+                        if (data.failed > 0) {
+                            alert('Conversion completed with ' + data.failed + ' failed tile(s)');
+                        } else {
+                            // Offer to open viewer
+                            if (confirm('Conversion complete! Open 3D viewer?')) {
+                                self.openViewer3d();
+                            }
+                        }
+                    } else if (data.status === 'error') {
+                        eventSource.close();
+                        self.converting = false;
+                        self.update3dControls();
+
+                        if (statusDiv) {
+                            statusDiv.textContent = 'Conversion error: ' + data.error;
+                        }
+                        alert('Conversion error: ' + data.error);
+                    }
+                };
+
+                eventSource.onerror = function() {
+                    eventSource.close();
+                    self.converting = false;
+                    self.update3dControls();
+
+                    if (statusDiv) {
+                        statusDiv.textContent = 'Connection lost during conversion';
+                    }
+                };
+            },
+
+            openViewer3d: function() {
+                if (!this.orderId) {
+                    alert('No LiDAR order loaded');
+                    return;
+                }
+
+                var convertedCount = Object.keys(this.convertedTiles).length;
+                if (convertedCount === 0) {
+                    alert('No tiles have been converted for 3D viewing yet');
+                    return;
+                }
+
+                window.open(apiUrl('/viewer3d/' + this.orderId), '_blank');
             }
         };
 
