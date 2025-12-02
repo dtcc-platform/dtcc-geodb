@@ -19,7 +19,7 @@ ExecStart=/opt/dtcc-geodb/venv/bin/gunicorn \
     --keep-alive 5 \
     --access-logfile /var/log/dtcc-geodb/access.log \
     --error-logfile /var/log/dtcc-geodb/error.log \
-    'src.lm_dtcc-geodb.management.server:create_management_app()'
+    'wsgi:app'
 
 # Restart policy
 Restart=always
