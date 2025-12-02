@@ -118,10 +118,16 @@ class MartinManager:
             self.process = None
 
     def is_running(self) -> bool:
-        """Check if Martin is running."""
-        if not self.process:
+        """Check if Martin is running by testing the port."""
+        import socket
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(('127.0.0.1', self.port))
+            sock.close()
+            return result == 0
+        except Exception:
             return False
-        return self.process.poll() is None
 
     def get_catalog_url(self) -> str:
         """Get Martin catalog URL."""
