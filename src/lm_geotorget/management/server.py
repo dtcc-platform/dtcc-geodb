@@ -644,11 +644,20 @@ def create_management_app(
 
         installed = MartinManager.is_installed()
 
+        # Create a temporary manager to check status even if not initialized
+        if not martin_manager and app.config['db_connection']:
+            martin_manager = MartinManager(app.config['db_connection'])
+
         if not martin_manager:
+            # Still check if Martin is running on default port
+            temp_manager = MartinManager('')
+            is_running = temp_manager.is_running()
             return jsonify({
                 'installed': installed,
-                'running': False,
+                'running': is_running,
                 'configured': False,
+                'port': 3000,
+                'catalog_url': 'http://127.0.0.1:3000/catalog' if is_running else None,
                 'message': 'Database not configured' if not app.config['db_connection'] else 'Martin not initialized'
             })
 
