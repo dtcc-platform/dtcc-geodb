@@ -1,0 +1,25 @@
+[Unit]
+Description=Martin Vector Tile Server
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/dtcc-geodb
+EnvironmentFile=/opt/dtcc-geodb/.env
+ExecStart=/usr/local/bin/martin --config /opt/dtcc-geodb/martin.yaml
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
