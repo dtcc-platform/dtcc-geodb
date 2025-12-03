@@ -1215,7 +1215,8 @@ def create_management_app(
                 // Create a getter function for range requests
                 const getter = async (begin, end) => {{
                     const response = await fetch(url, {{
-                        headers: {{ 'Range': `bytes=${{begin}}-${{end - 1}}` }}
+                        headers: {{ 'Range': `bytes=${{begin}}-${{end - 1}}` }},
+                        credentials: 'include'
                     }});
                     const buffer = await response.arrayBuffer();
                     return new Uint8Array(buffer);
@@ -1338,7 +1339,8 @@ def create_management_app(
                 // Start conversion
                 const response = await fetch(basePath + '/api/orders/' + orderId + '/copc/convert', {{
                     method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }}
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    credentials: 'include'
                 }});
 
                 if (!response.ok) {{
