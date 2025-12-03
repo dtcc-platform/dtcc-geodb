@@ -895,6 +895,11 @@ def create_management_app(
             conditional=True  # Enable range requests
         )
 
+    @app.route('/viewer3d/laz-perf.wasm')
+    def serve_laz_perf_wasm():
+        """Redirect to CDN for laz-perf WASM file (required by copc.js)."""
+        return redirect('https://cdn.jsdelivr.net/npm/laz-perf@0.0.3/lib/laz-perf.wasm')
+
     @app.route('/viewer3d/<order_id>')
     @login_required
     def viewer3d(order_id: str):
