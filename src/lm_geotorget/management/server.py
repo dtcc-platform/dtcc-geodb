@@ -898,7 +898,7 @@ def create_management_app(
     @app.route('/viewer3d/laz-perf.wasm')
     def serve_laz_perf_wasm():
         """Redirect to CDN for laz-perf WASM file (required by copc.js)."""
-        return redirect('https://cdn.jsdelivr.net/npm/laz-perf@0.0.3/lib/laz-perf.wasm')
+        return redirect('https://esm.sh/laz-perf@0.0.3/lib/laz-perf.wasm')
 
     @app.route('/viewer3d/<order_id>')
     @login_required
@@ -1215,7 +1215,7 @@ def create_management_app(
                 document.getElementById('loadingText').textContent = 'Loading ' + tileName + '...';
 
                 // Import copc.js for COPC file reading
-                const copc = await import('https://cdn.jsdelivr.net/npm/copc@0.0.6/+esm');
+                const copc = await import('https://esm.sh/copc@0.0.6');
 
                 // Create a getter function for range requests
                 const getter = async (begin, end) => {{
