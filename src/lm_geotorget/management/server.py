@@ -6333,11 +6333,12 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 }
 
                 // Use fetch with streaming for SSE progress
-                var url = '/api/orders/' + this.orderId + '/lidar-tiles/' + encodeURIComponent(filename) + '/download';
+                var url = apiUrl('/api/orders/' + this.orderId + '/lidar-tiles/' + encodeURIComponent(filename) + '/download');
 
                 fetch(url, {
                     method: 'POST',
-                    headers: {'Content-Type': 'application/json'}
+                    headers: {'Content-Type': 'application/json'},
+                    credentials: 'include'
                 }).then(function(response) {
                     var reader = response.body.getReader();
                     var decoder = new TextDecoder();
