@@ -695,62 +695,70 @@ def create_management_app(
             download_name=tile_name
         )
 
-    # ==================== Potree 3D Point Cloud Viewer ====================
+    # ==================== COPC Conversion (LAZ 1.4 support) ====================
+    # COPC (Cloud Optimized Point Cloud) provides proper LAZ 1.4 support
+    # and efficient web streaming via copc.js
 
-    # Track active Potree conversions
-    potree_conversion_queues: dict[str, queue.Queue] = {}
-    potree_conversion_active: dict[str, bool] = {}
+    copc_conversion_queues: dict[str, queue.Queue] = {}
+    copc_conversion_active: dict[str, bool] = {}
 
-    @app.route('/api/orders/<order_id>/potree/status')
+    @app.route('/api/orders/<order_id>/copc/status')
     @login_required
-    def potree_status(order_id: str):
-        """Get Potree converter status and installation info."""
-        from ..tiling.potree_converter import PotreeConverter
+    def copc_status(order_id: str):
+        """Get COPC converter status and installation info."""
+        from ..tiling.copc_converter import CopcConverter
 
-        converter = PotreeConverter()
+        converter = CopcConverter()
         return jsonify({
-            'installed': converter.is_installed(),
-            'version': converter.get_version(),
-            'install_url': 'https://github.com/potree/PotreeConverter'
+            'pdal_installed': converter.is_pdal_installed(),
+            'pdal_version': converter.get_pdal_version(),
+            'copc_supported': converter.supports_copc(),
+            'install_instructions': 'sudo apt install pdal (version >= 2.4 for COPC)'
         })
 
-    @app.route('/api/orders/<order_id>/potree/converted')
+    @app.route('/api/orders/<order_id>/copc/converted')
     @login_required
-    def get_potree_converted(order_id: str):
-        """Get list of tiles converted to Potree format."""
-        from ..tiling.potree_converter import PotreeConverter
+    def get_copc_converted(order_id: str):
+        """Get list of tiles converted to COPC format."""
+        from ..tiling.copc_converter import CopcConverter
 
         order_dir = app.config['downloads_dir'] / order_id
         if not order_dir.exists():
             return jsonify({'error': 'Order not found'}), 404
 
-        converted = PotreeConverter.get_converted_tiles(order_dir)
+        converted = CopcConverter.get_converted_tiles(order_dir)
         return jsonify({
             'order_id': order_id,
             'converted': converted,
             'count': len(converted)
         })
 
-    @app.route('/api/orders/<order_id>/potree/convert', methods=['POST'])
+    @app.route('/api/orders/<order_id>/copc/convert', methods=['POST'])
     @login_required
-    def start_potree_conversion(order_id: str):
-        """Start converting LAZ tiles to Potree format."""
-        from ..tiling.potree_converter import PotreeConverter
+    def start_copc_conversion(order_id: str):
+        """Start converting LAZ tiles to COPC format."""
+        from ..tiling.copc_converter import CopcConverter
 
         # Check if already converting
-        if potree_conversion_active.get(order_id):
+        if copc_conversion_active.get(order_id):
             return jsonify({'error': 'Conversion already in progress'}), 409
 
         order_dir = app.config['downloads_dir'] / order_id
         if not order_dir.exists():
             return jsonify({'error': 'Order not found'}), 404
 
-        # Check PotreeConverter installation
-        converter = PotreeConverter()
-        if not converter.is_installed():
+        # Check pdal installation
+        converter = CopcConverter()
+        if not converter.is_pdal_installed():
             return jsonify({
-                'error': 'PotreeConverter not installed',
-                'install_url': 'https://github.com/potree/PotreeConverter'
+                'error': 'pdal not installed',
+                'install_instructions': 'sudo apt install pdal'
+            }), 400
+
+        if not converter.supports_copc():
+            return jsonify({
+                'error': 'pdal version does not support COPC. Upgrade to >= 2.4',
+                'pdal_version': converter.get_pdal_version()
             }), 400
 
         # Get tiles to convert from request body
@@ -758,7 +766,13 @@ def create_management_app(
         tile_names = data.get('tiles', [])
 
         if not tile_names:
-            return jsonify({'error': 'No tiles specified'}), 400
+            # If no tiles specified, convert all downloaded tiles
+            tiles_dir = order_dir / 'tiles'
+            if tiles_dir.exists():
+                tile_names = [f.name for f in tiles_dir.glob('*.laz')]
+
+        if not tile_names:
+            return jsonify({'error': 'No tiles to convert'}), 400
 
         # Verify all tiles exist
         tiles_dir = order_dir / 'tiles'
@@ -768,8 +782,8 @@ def create_management_app(
 
         # Create progress queue
         progress_queue: queue.Queue = queue.Queue()
-        potree_conversion_queues[order_id] = progress_queue
-        potree_conversion_active[order_id] = True
+        copc_conversion_queues[order_id] = progress_queue
+        copc_conversion_active[order_id] = True
 
         def conversion_thread():
             try:
@@ -807,7 +821,7 @@ def create_management_app(
                     'error': str(e)
                 })
             finally:
-                potree_conversion_active[order_id] = False
+                copc_conversion_active[order_id] = False
 
         thread = threading.Thread(target=conversion_thread, daemon=True)
         thread.start()
@@ -818,13 +832,13 @@ def create_management_app(
             'count': len(tile_names)
         })
 
-    @app.route('/api/orders/<order_id>/potree/convert/progress')
+    @app.route('/api/orders/<order_id>/copc/convert/progress')
     @login_required
-    def potree_conversion_progress(order_id: str):
-        """SSE endpoint for Potree conversion progress."""
-        progress_queue = potree_conversion_queues.get(order_id)
+    def copc_conversion_progress(order_id: str):
+        """SSE endpoint for COPC conversion progress."""
+        progress_queue = copc_conversion_queues.get(order_id)
 
-        if not progress_queue and not potree_conversion_active.get(order_id):
+        if not progress_queue and not copc_conversion_active.get(order_id):
             return jsonify({'error': 'No active conversion'}), 404
 
         def generate():
@@ -835,17 +849,14 @@ def create_management_app(
                     yield f"data: {json.dumps(progress)}\n\n"
 
                     if progress.get('status') in ('completed', 'error'):
-                        # Cleanup
-                        potree_conversion_queues.pop(order_id, None)
+                        copc_conversion_queues.pop(order_id, None)
                         break
                 except queue.Empty:
-                    # Send keepalive every 15 seconds
                     if time.time() - last_keepalive > 15:
                         yield f"data: {json.dumps({'keepalive': True})}\n\n"
                         last_keepalive = time.time()
 
-                    # Check if conversion is still active
-                    if not potree_conversion_active.get(order_id):
+                    if not copc_conversion_active.get(order_id):
                         break
 
         return Response(
@@ -857,61 +868,70 @@ def create_management_app(
             }
         )
 
-    @app.route('/api/orders/<order_id>/potree/<path:potree_path>')
+    @app.route('/api/orders/<order_id>/copc/<filename>')
     @login_required
-    def serve_potree_file(order_id: str, potree_path: str):
-        """Serve Potree data files (cloud.js, metadata.json, *.bin)."""
+    def serve_copc_file(order_id: str, filename: str):
+        """Serve COPC files for browser viewing."""
         from flask import send_file
 
         order_dir = app.config['downloads_dir'] / order_id
         if not order_dir.exists():
             return jsonify({'error': 'Order not found'}), 404
 
-        potree_dir = order_dir / 'potree'
-        file_path = potree_dir / potree_path
+        copc_dir = order_dir / 'copc'
+        file_path = copc_dir / filename
 
-        # Security: ensure path is within potree directory
-        try:
-            file_path.resolve().relative_to(potree_dir.resolve())
-        except ValueError:
-            return jsonify({'error': 'Invalid path'}), 403
+        # Security: ensure filename doesn't escape copc directory
+        if '..' in filename or filename.startswith('/'):
+            return jsonify({'error': 'Invalid filename'}), 403
 
         if not file_path.exists():
             return jsonify({'error': 'File not found'}), 404
 
-        # Determine MIME type
-        suffix = file_path.suffix.lower()
-        mime_types = {
-            '.json': 'application/json',
-            '.js': 'application/javascript',
-            '.bin': 'application/octet-stream',
-        }
-        mimetype = mime_types.get(suffix, 'application/octet-stream')
-
-        return send_file(file_path, mimetype=mimetype)
+        # Support range requests for efficient streaming
+        return send_file(
+            file_path,
+            mimetype='application/octet-stream',
+            conditional=True  # Enable range requests
+        )
 
     @app.route('/viewer3d/<order_id>')
     @login_required
     def viewer3d(order_id: str):
-        """3D point cloud viewer using Potree."""
-        from ..tiling.potree_converter import PotreeConverter
+        """3D point cloud viewer using copc.js for LAZ 1.4 support."""
+        from ..tiling.copc_converter import CopcConverter
 
         order_dir = app.config['downloads_dir'] / order_id
         if not order_dir.exists():
             return jsonify({'error': 'Order not found'}), 404
 
-        converted = PotreeConverter.get_converted_tiles(order_dir)
-        converted_json = json.dumps(converted)
+        # Get downloaded LAZ tiles
+        tiles_dir = order_dir / 'tiles'
+        downloaded_tiles = []
+        if tiles_dir.exists():
+            for f in tiles_dir.glob('*.laz'):
+                tile_name = f.stem
+                is_converted = CopcConverter.is_tile_converted(order_dir, tile_name)
+                downloaded_tiles.append({
+                    'filename': f.name,
+                    'tile_name': tile_name,
+                    'size_mb': round(f.stat().st_size / (1024 * 1024), 1),
+                    'copc_ready': is_converted,
+                    'copc_filename': f"{tile_name}.copc.laz" if is_converted else None
+                })
 
-        # Note: order_id is a UUID from our file system, converted_json contains
-        # tile names from our file system - both are server-controlled, not user input
+        # Get already converted COPC tiles
+        copc_tiles = CopcConverter.get_converted_tiles(order_dir)
+        tiles_json = json.dumps(downloaded_tiles)
+        copc_tiles_json = json.dumps(copc_tiles)
+
+        # Note: order_id and tiles come from our file system - server-controlled
         return f'''<!DOCTYPE html>
 <html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>3D Point Cloud Viewer</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/potree-core@1.1.0/potree.css">
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         body {{
@@ -920,7 +940,7 @@ def create_management_app(
             color: #fff;
             overflow: hidden;
         }}
-        #potree_container {{
+        #viewer {{
             position: absolute;
             top: 0;
             left: 0;
@@ -951,6 +971,23 @@ def create_management_app(
         .header a:hover {{
             text-decoration: underline;
         }}
+        .controls {{
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 15px;
+            border-radius: 8px;
+            z-index: 1000;
+        }}
+        .controls label {{
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.8rem;
+        }}
+        .controls input[type="range"] {{
+            width: 150px;
+        }}
         .tile-list {{
             position: absolute;
             top: 60px;
@@ -961,7 +998,7 @@ def create_management_app(
             z-index: 1000;
             max-height: 300px;
             overflow-y: auto;
-            min-width: 200px;
+            min-width: 220px;
         }}
         .tile-list h3 {{
             font-size: 0.9rem;
@@ -984,6 +1021,7 @@ def create_management_app(
             height: 8px;
             border-radius: 50%;
             background: #888;
+            flex-shrink: 0;
         }}
         .tile-status.loading {{
             background: #ff9800;
@@ -1026,150 +1064,430 @@ def create_management_app(
             color: #ffd700;
             margin-bottom: 10px;
         }}
+        .stats {{
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(26, 26, 46, 0.9);
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            z-index: 1000;
+        }}
+        .tile-status.needs-convert {{
+            background: #9c27b0;
+        }}
+        .convert-btn {{
+            background: #9c27b0;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 10px;
+            font-size: 0.8rem;
+        }}
+        .convert-btn:hover {{
+            background: #7b1fa2;
+        }}
+        .convert-btn:disabled {{
+            opacity: 0.5;
+            cursor: wait;
+        }}
+        .conversion-status {{
+            margin-top: 10px;
+            font-size: 0.75rem;
+            color: #ff9800;
+        }}
     </style>
 </head>
 <body>
-    <div id="potree_container"></div>
+    <div id="viewer"></div>
 
     <div class="header">
-        <h1>3D Point Cloud Viewer</h1>
+        <h1>3D Point Cloud Viewer (COPC)</h1>
         <a href="javascript:history.back()">Back to Dashboard</a>
     </div>
 
     <div class="tile-list" id="tileList">
-        <h3>Loaded Tiles</h3>
+        <h3>Point Cloud Tiles</h3>
         <div id="tileItems"></div>
+        <button class="convert-btn" id="convertBtn" style="display:none;" onclick="startConversion()">
+            Convert to COPC
+        </button>
+        <div class="conversion-status" id="conversionStatus"></div>
+    </div>
+
+    <div class="controls" id="controls" style="display:none;">
+        <label>Point Size: <span id="sizeValue">2</span></label>
+        <input type="range" id="pointSize" min="1" max="10" value="2" step="0.5">
+    </div>
+
+    <div class="stats" id="stats" style="display:none;">
+        Points: <span id="pointCount">0</span>
     </div>
 
     <div class="loading-overlay" id="loadingOverlay">
         <div class="loading-spinner"></div>
-        <p style="margin-top: 15px;">Loading point clouds...</p>
+        <p style="margin-top: 15px;" id="loadingText">Initializing viewer...</p>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/three@0.137.0/build/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/potree-core@1.1.0/potree.js"></script>
-    <script>
-        (function() {{
-            var orderId = {json.dumps(order_id)};
-            var convertedTiles = {converted_json};
-            var loadedCount = 0;
-            var tileStatus = {{}};
+    <script type="importmap">
+    {{
+        "imports": {{
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }}
+    }}
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import {{ OrbitControls }} from 'three/addons/controls/OrbitControls.js';
 
-            function updateTileStatus(tileName, status) {{
-                tileStatus[tileName] = status;
-                var itemEl = document.getElementById('tile-' + tileName);
-                if (itemEl) {{
-                    var statusEl = itemEl.querySelector('.tile-status');
-                    statusEl.className = 'tile-status ' + status;
-                }}
+        const orderId = {json.dumps(order_id)};
+        const tiles = {tiles_json};
+        const copcTiles = {copc_tiles_json};
+        let scene, camera, renderer, controls;
+        let totalPoints = 0;
+
+        // Make startConversion available globally
+        window.startConversion = startConversion;
+
+        function updateTileStatus(tileName, status) {{
+            const itemEl = document.getElementById('tile-' + tileName.replace(/\\./g, '-'));
+            if (itemEl) {{
+                const statusEl = itemEl.querySelector('.tile-status');
+                statusEl.className = 'tile-status ' + status;
+            }}
+        }}
+
+        function createTileItem(tile) {{
+            const div = document.createElement('div');
+            div.className = 'tile-item';
+            div.id = 'tile-' + tile.tile_name.replace(/\\./g, '-');
+
+            const statusDiv = document.createElement('div');
+            statusDiv.className = 'tile-status ' + (tile.copc_ready ? 'loaded' : 'needs-convert');
+
+            const nameSpan = document.createElement('span');
+            const status = tile.copc_ready ? ' (COPC ready)' : ' (needs conversion)';
+            nameSpan.textContent = tile.tile_name + status;
+
+            div.appendChild(statusDiv);
+            div.appendChild(nameSpan);
+            return div;
+        }}
+
+        function showMessage(title, text, showConvert = false) {{
+            const overlay = document.getElementById('loadingOverlay');
+            overlay.innerHTML = '';
+            const container = document.createElement('div');
+            container.className = 'no-tiles';
+
+            const h2 = document.createElement('h2');
+            h2.textContent = title;
+
+            const p = document.createElement('p');
+            p.textContent = text;
+
+            container.appendChild(h2);
+            container.appendChild(p);
+
+            if (showConvert) {{
+                const btn = document.createElement('button');
+                btn.className = 'convert-btn';
+                btn.textContent = 'Convert All Tiles to COPC';
+                btn.onclick = startConversion;
+                btn.style.marginTop = '20px';
+                container.appendChild(btn);
             }}
 
-            function createTileItem(tileName) {{
-                var div = document.createElement('div');
-                div.className = 'tile-item';
-                div.id = 'tile-' + tileName;
+            overlay.appendChild(container);
+        }}
 
-                var statusDiv = document.createElement('div');
-                statusDiv.className = 'tile-status loading';
+        async function loadCopcFile(url, tileName) {{
+            try {{
+                document.getElementById('loadingText').textContent = 'Loading ' + tileName + '...';
 
-                var nameSpan = document.createElement('span');
-                nameSpan.textContent = tileName;
+                // Import copc.js for COPC file reading
+                const copc = await import('https://cdn.jsdelivr.net/npm/copc@0.0.6/+esm');
 
-                div.appendChild(statusDiv);
-                div.appendChild(nameSpan);
-                return div;
-            }}
+                // Create a getter function for range requests
+                const getter = async (begin, end) => {{
+                    const response = await fetch(url, {{
+                        headers: {{ 'Range': `bytes=${{begin}}-${{end - 1}}` }}
+                    }});
+                    const buffer = await response.arrayBuffer();
+                    return new Uint8Array(buffer);
+                }};
 
-            function showMessage(title, text) {{
-                var overlay = document.getElementById('loadingOverlay');
-                while (overlay.firstChild) {{
-                    overlay.removeChild(overlay.firstChild);
-                }}
-                var container = document.createElement('div');
-                container.className = 'no-tiles';
+                // Load COPC metadata
+                const copcFile = await copc.Copc.create(getter);
 
-                var h2 = document.createElement('h2');
-                h2.textContent = title;
+                // Load hierarchy
+                const {{ nodes }} = await copc.Copc.loadHierarchyPage(getter, copcFile.info.rootHierarchyPage);
 
-                var p = document.createElement('p');
-                p.textContent = text;
-
-                container.appendChild(h2);
-                container.appendChild(p);
-                overlay.appendChild(container);
-            }}
-
-            function initViewer() {{
-                var container = document.getElementById('potree_container');
-                var loadingOverlay = document.getElementById('loadingOverlay');
-                var tileItems = document.getElementById('tileItems');
-
-                if (convertedTiles.length === 0) {{
-                    showMessage('No converted tiles', 'Go back to the dashboard and convert some tiles first.');
-                    return;
-                }}
-
-                // Create tile list using safe DOM methods
-                convertedTiles.forEach(function(tile) {{
-                    var item = createTileItem(tile.tile_name);
-                    tileItems.appendChild(item);
-                    tileStatus[tile.tile_name] = 'loading';
+                // Get all node keys and sort by depth (load coarser levels first)
+                const nodeKeys = Object.keys(nodes).sort((a, b) => {{
+                    const depthA = parseInt(a.split('-')[0]);
+                    const depthB = parseInt(b.split('-')[0]);
+                    return depthA - depthB;
                 }});
 
-                // Check if Potree is available
-                if (typeof Potree === 'undefined') {{
-                    showMessage('Error', 'Could not load Potree library.');
-                    return;
-                }}
+                // Limit to first few levels for performance
+                const maxDepth = 3;
+                const nodesToLoad = nodeKeys.filter(key => {{
+                    const depth = parseInt(key.split('-')[0]);
+                    return depth <= maxDepth;
+                }});
 
-                // Initialize Potree viewer
-                var viewer = new Potree.Viewer(container);
-                viewer.setEDLEnabled(true);
-                viewer.setFOV(60);
-                viewer.setPointBudget(2000000);
-                viewer.setBackground('gradient');
+                let tilePoints = 0;
 
-                // Load each tile
-                var baseUrl = window.location.origin;
-                convertedTiles.forEach(function(tile) {{
-                    var pointCloudUrl = baseUrl + '/api/orders/' + orderId + '/potree/' + tile.tile_name + '/metadata.json';
+                for (const nodeKey of nodesToLoad) {{
+                    const node = nodes[nodeKey];
+                    if (!node || node.pointCount === 0) continue;
 
-                    Potree.loadPointCloud(pointCloudUrl, tile.tile_name, function(e) {{
-                        if (e.pointcloud) {{
-                            viewer.scene.addPointCloud(e.pointcloud);
-                            updateTileStatus(tile.tile_name, 'loaded');
-                            loadedCount++;
+                    try {{
+                        const view = await copc.Copc.loadPointDataView(getter, copcFile, node);
 
-                            if (loadedCount === convertedTiles.length) {{
-                                loadingOverlay.style.display = 'none';
-                                viewer.fitToScreen();
-                            }}
-                        }} else {{
-                            updateTileStatus(tile.tile_name, 'error');
-                            loadedCount++;
-                            if (loadedCount === convertedTiles.length) {{
-                                loadingOverlay.style.display = 'none';
+                        const pointCount = node.pointCount;
+                        const positions = new Float32Array(pointCount * 3);
+                        const colors = new Float32Array(pointCount * 3);
+
+                        // Get dimension getters
+                        const getX = view.getter('X');
+                        const getY = view.getter('Y');
+                        const getZ = view.getter('Z');
+
+                        // Try to get color or intensity
+                        let getRed, getGreen, getBlue, getIntensity;
+                        try {{ getRed = view.getter('Red'); }} catch {{}}
+                        try {{ getGreen = view.getter('Green'); }} catch {{}}
+                        try {{ getBlue = view.getter('Blue'); }} catch {{}}
+                        try {{ getIntensity = view.getter('Intensity'); }} catch {{}}
+
+                        // Get bounds for normalization
+                        const header = copcFile.header;
+                        const offsetX = header.min[0];
+                        const offsetY = header.min[1];
+                        const offsetZ = header.min[2];
+
+                        for (let i = 0; i < pointCount; i++) {{
+                            // Position (swap Y/Z for three.js, Y-up)
+                            positions[i * 3] = getX(i) - offsetX;
+                            positions[i * 3 + 1] = getZ(i) - offsetZ;
+                            positions[i * 3 + 2] = -(getY(i) - offsetY);
+
+                            // Color
+                            if (getRed && getGreen && getBlue) {{
+                                colors[i * 3] = getRed(i) / 65535;
+                                colors[i * 3 + 1] = getGreen(i) / 65535;
+                                colors[i * 3 + 2] = getBlue(i) / 65535;
+                            }} else if (getIntensity) {{
+                                const intensity = getIntensity(i) / 65535;
+                                colors[i * 3] = intensity;
+                                colors[i * 3 + 1] = intensity;
+                                colors[i * 3 + 2] = intensity;
+                            }} else {{
+                                // Color by height
+                                const h = ((getZ(i) - offsetZ) % 50) / 50;
+                                colors[i * 3] = h;
+                                colors[i * 3 + 1] = 0.5;
+                                colors[i * 3 + 2] = 1 - h;
                             }}
                         }}
-                    }});
+
+                        const geometry = new THREE.BufferGeometry();
+                        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+                        const material = new THREE.PointsMaterial({{
+                            size: 2,
+                            vertexColors: true,
+                            sizeAttenuation: true
+                        }});
+
+                        const points = new THREE.Points(geometry, material);
+                        scene.add(points);
+
+                        tilePoints += pointCount;
+                    }} catch (nodeErr) {{
+                        console.warn('Failed to load node ' + nodeKey + ':', nodeErr);
+                    }}
+                }}
+
+                totalPoints += tilePoints;
+                document.getElementById('pointCount').textContent = totalPoints.toLocaleString();
+
+                return true;
+            }} catch (err) {{
+                console.error('Error loading COPC ' + tileName + ':', err);
+                return false;
+            }}
+        }}
+
+        async function startConversion() {{
+            const basePath = window.location.pathname.replace(/\\/viewer3d\\/.*$/, '');
+            const statusDiv = document.getElementById('conversionStatus');
+            const convertBtn = document.getElementById('convertBtn');
+
+            if (convertBtn) convertBtn.disabled = true;
+            statusDiv.textContent = 'Starting conversion...';
+
+            try {{
+                // Start conversion
+                const response = await fetch(basePath + '/api/orders/' + orderId + '/copc/convert', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }}
                 }});
 
-                // Animation loop
-                function animate() {{
-                    requestAnimationFrame(animate);
-                    viewer.update();
-                    viewer.render();
+                if (!response.ok) {{
+                    const err = await response.json();
+                    throw new Error(err.error || 'Conversion failed');
                 }}
-                animate();
+
+                // Connect to progress stream
+                const eventSource = new EventSource(basePath + '/api/orders/' + orderId + '/copc/convert/progress');
+
+                eventSource.onmessage = (event) => {{
+                    const data = JSON.parse(event.data);
+
+                    if (data.keepalive) return;
+
+                    if (data.status === 'converting') {{
+                        statusDiv.textContent = `Converting ${{data.tiles_done + 1}}/${{data.tiles_total}}: ${{data.current_tile}}`;
+                    }} else if (data.status === 'completed') {{
+                        eventSource.close();
+                        statusDiv.textContent = `Conversion complete! ${{data.tiles_done}} tiles converted.`;
+                        // Reload page to show converted tiles
+                        setTimeout(() => location.reload(), 1500);
+                    }} else if (data.status === 'error') {{
+                        eventSource.close();
+                        statusDiv.textContent = 'Error: ' + data.error;
+                        if (convertBtn) convertBtn.disabled = false;
+                    }}
+                }};
+
+                eventSource.onerror = () => {{
+                    eventSource.close();
+                    statusDiv.textContent = 'Connection lost';
+                    if (convertBtn) convertBtn.disabled = false;
+                }};
+
+            }} catch (err) {{
+                statusDiv.textContent = 'Error: ' + err.message;
+                if (convertBtn) convertBtn.disabled = false;
+            }}
+        }}
+
+        async function init() {{
+            const container = document.getElementById('viewer');
+            const tileItems = document.getElementById('tileItems');
+            const loadingOverlay = document.getElementById('loadingOverlay');
+            const convertBtn = document.getElementById('convertBtn');
+
+            if (tiles.length === 0) {{
+                showMessage('No LAZ tiles', 'Go back to the dashboard and download some tiles first.');
+                return;
             }}
 
-            // Initialize when DOM is ready
-            if (document.readyState === 'loading') {{
-                document.addEventListener('DOMContentLoaded', initViewer);
-            }} else {{
-                initViewer();
+            // Create tile list
+            tiles.forEach(tile => {{
+                tileItems.appendChild(createTileItem(tile));
+            }});
+
+            // Check if any tiles need conversion
+            const copcReadyTiles = tiles.filter(t => t.copc_ready);
+            const needsConversion = tiles.filter(t => !t.copc_ready);
+
+            if (copcReadyTiles.length === 0) {{
+                showMessage(
+                    'Tiles need conversion',
+                    'LAZ 1.4 files need to be converted to COPC format for web viewing. Click below to start conversion.',
+                    true
+                );
+                if (convertBtn) convertBtn.style.display = 'block';
+                return;
             }}
-        }})();
+
+            // Show convert button if some tiles still need conversion
+            if (needsConversion.length > 0 && convertBtn) {{
+                convertBtn.style.display = 'block';
+                convertBtn.textContent = `Convert ${{needsConversion.length}} remaining tile(s)`;
+            }}
+
+            // Setup Three.js
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a2e);
+
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
+            camera.position.set(500, 500, 500);
+
+            renderer = new THREE.WebGLRenderer({{ antialias: true }});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            container.appendChild(renderer.domElement);
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // Add grid helper
+            const grid = new THREE.GridHelper(1000, 50, 0x444444, 0x222222);
+            scene.add(grid);
+
+            // Load COPC tiles
+            const basePath = window.location.pathname.replace(/\\/viewer3d\\/.*$/, '');
+            for (const tile of copcReadyTiles) {{
+                const url = basePath + '/api/orders/' + orderId + '/copc/' + tile.copc_filename;
+                document.getElementById('loadingText').textContent = 'Loading ' + tile.tile_name + '...';
+                updateTileStatus(tile.tile_name, 'loading');
+                const success = await loadCopcFile(url, tile.tile_name);
+                updateTileStatus(tile.tile_name, success ? 'loaded' : 'error');
+            }}
+
+            loadingOverlay.style.display = 'none';
+            document.getElementById('controls').style.display = 'block';
+            document.getElementById('stats').style.display = 'block';
+
+            // Fit camera to scene
+            const box = new THREE.Box3().setFromObject(scene);
+            if (!box.isEmpty()) {{
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+                camera.position.set(center.x + maxDim, center.y + maxDim, center.z + maxDim);
+                controls.target.copy(center);
+            }}
+
+            // Point size control
+            document.getElementById('pointSize').addEventListener('input', (e) => {{
+                const size = parseFloat(e.target.value);
+                document.getElementById('sizeValue').textContent = size;
+                scene.traverse(obj => {{
+                    if (obj.isPoints && obj.material) {{
+                        obj.material.size = size;
+                    }}
+                }});
+            }});
+
+            // Handle resize
+            window.addEventListener('resize', () => {{
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            }});
+
+            // Animate
+            function animate() {{
+                requestAnimationFrame(animate);
+                controls.update();
+                renderer.render(scene, camera);
+            }}
+            animate();
+        }}
+
+        init();
     </script>
 </body>
 </html>'''
@@ -3722,28 +4040,6 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
         .btn-3d.btn-view:hover:not(:disabled) {
             background: #7B1FA2;
         }
-        .lidar-popup .select-row {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 8px;
-            padding-top: 8px;
-            border-top: 1px solid var(--border-subtle);
-        }
-        .lidar-popup .select-row input[type="checkbox"] {
-            width: 16px;
-            height: 16px;
-            accent-color: #2196F3;
-        }
-        .lidar-popup .select-row label {
-            font-size: 12px;
-            color: var(--text-primary);
-            cursor: pointer;
-        }
-        .lidar-popup .status-converted {
-            color: #2196F3;
-            font-weight: 500;
-        }
     </style>
 </head>
 <body>
@@ -3836,9 +4132,6 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     </div>
                     <div class="lidar-status" id="lidarStatus"></div>
                     <div class="lidar-3d-controls" id="lidar3dControls" style="display: none; margin-top: 0.5rem;">
-                        <button class="btn-3d" id="prepare3dBtn" onclick="LidarViewer.startConversion()" disabled>
-                            Prepare for 3D (<span id="selectedCount">0</span>)
-                        </button>
                         <button class="btn-3d btn-view" id="view3dBtn" onclick="LidarViewer.openViewer3d()" disabled>
                             View in 3D
                         </button>
@@ -5760,10 +6053,6 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
             handlersAdded: false,
             downloadedTiles: {},
             downloading: {},
-            // 3D viewer properties
-            selectedTiles: {},
-            convertedTiles: {},
-            converting: false,
 
             init: function() {
                 var self = this;
@@ -5803,18 +6092,16 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         self.orderId = lidarOrder.order_id;
                         if (statusDiv) statusDiv.textContent = 'Loading tiles...';
 
-                        // Load tiles, downloaded status, and converted status
+                        // Load tiles and downloaded status
                         return Promise.all([
                             fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles.geojson')).then(function(r) { return r.json(); }),
-                            fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles/downloaded')).then(function(r) { return r.json(); }),
-                            fetch(apiUrl('/api/orders/' + self.orderId + '/potree/converted')).then(function(r) { return r.json(); })
+                            fetch(apiUrl('/api/orders/' + self.orderId + '/lidar-tiles/downloaded')).then(function(r) { return r.json(); })
                         ]);
                     })
                     .then(function(results) {
                         if (!results) return;
                         var geojson = results[0];
                         var downloaded = results[1];
-                        var converted = results[2];
 
                         // Mark downloaded tiles
                         self.downloadedTiles = {};
@@ -5824,19 +6111,10 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                             });
                         }
 
-                        // Mark converted tiles
-                        self.convertedTiles = {};
-                        if (converted && converted.converted) {
-                            converted.converted.forEach(function(t) {
-                                self.convertedTiles[t.laz_name] = true;
-                            });
-                        }
-
-                        // Add downloaded and converted properties to each feature
+                        // Add downloaded property to each feature
                         geojson.features.forEach(function(f) {
                             var filename = f.properties.filename;
                             f.properties.downloaded = self.downloadedTiles[filename] ? 1 : 0;
-                            f.properties.converted = self.convertedTiles[filename] ? 1 : 0;
                         });
 
                         self.tiles = geojson;
@@ -5844,13 +6122,11 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         self.update3dControls();
 
                         var downloadedCount = Object.keys(self.downloadedTiles).length;
-                        var convertedCount = Object.keys(self.convertedTiles).length;
                         if (statusDiv) {
-                            var status = geojson.features.length + ' tiles (' + downloadedCount + ' downloaded';
-                            if (convertedCount > 0) {
-                                status += ', ' + convertedCount + ' ready for 3D';
+                            var status = geojson.features.length + ' tiles';
+                            if (downloadedCount > 0) {
+                                status += ' (' + downloadedCount + ' downloaded, ready for 3D)';
                             }
-                            status += ')';
                             statusDiv.textContent = status;
                         }
                     })
@@ -5884,7 +6160,7 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 });
 
                 // Add fill layer with color based on status:
-                // Blue = converted to Potree, Green = downloaded, Pink = not downloaded
+                // Green = downloaded (ready for 3D), Pink = not downloaded
                 map.addLayer({
                     id: 'lidar-tiles-fill',
                     type: 'fill',
@@ -5892,10 +6168,8 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     paint: {
                         'fill-color': [
                             'case',
-                            ['==', ['get', 'converted'], 1],
-                            '#2196F3',  // Blue for converted to Potree
                             ['==', ['get', 'downloaded'], 1],
-                            '#4CAF50',  // Green for downloaded
+                            '#4CAF50',  // Green for downloaded (ready for 3D)
                             '#E91E63'   // Pink for not downloaded
                         ],
                         'fill-opacity': 0.25
@@ -5910,8 +6184,6 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     paint: {
                         'line-color': [
                             'case',
-                            ['==', ['get', 'converted'], 1],
-                            '#2196F3',
                             ['==', ['get', 'downloaded'], 1],
                             '#4CAF50',
                             '#E91E63'
@@ -5931,40 +6203,18 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                         var props = feature.properties;
                         var isDownloaded = self.downloadedTiles[props.filename];
                         var isDownloading = self.downloading[props.filename];
-                        var isConverted = self.convertedTiles[props.filename];
-                        var isSelected = self.selectedTiles[props.filename];
 
                         // Status text
-                        var statusText;
-                        if (isConverted) {
-                            statusText = '<span class="status-converted">Ready for 3D</span>';
-                        } else if (isDownloaded) {
-                            statusText = 'Downloaded';
-                        } else {
-                            statusText = 'Not downloaded';
-                        }
+                        var statusText = isDownloaded ? 'Downloaded (ready for 3D)' : 'Not downloaded';
 
                         // Action button
                         var btnHtml;
-                        if (isConverted) {
-                            btnHtml = '<span class="download-btn" style="background: #2196F3; cursor: default;">Converted</span>';
-                        } else if (isDownloaded) {
+                        if (isDownloaded) {
                             btnHtml = '<span class="download-btn" style="background: #4CAF50; cursor: default;">Downloaded</span>';
                         } else if (isDownloading) {
                             btnHtml = '<span class="download-btn" style="background: #FF9800; cursor: wait;">Downloading...</span>';
                         } else {
                             btnHtml = '<a class="download-btn" href="#" onclick="LidarViewer.downloadTile(\\'' + props.filename + '\\'); return false;">Download Tile</a>';
-                        }
-
-                        // Selection checkbox (only for downloaded but not converted tiles)
-                        var selectHtml = '';
-                        if (isDownloaded && !isConverted) {
-                            var checked = isSelected ? 'checked' : '';
-                            selectHtml = '<div class="select-row">' +
-                                '<input type="checkbox" id="select-' + props.filename + '" ' + checked + ' ' +
-                                'onchange="LidarViewer.toggleTileSelection(\\'' + props.filename + '\\')">' +
-                                '<label for="select-' + props.filename + '">Select for 3D conversion</label>' +
-                                '</div>';
                         }
 
                         var html = '<div class="lidar-popup">' +
@@ -5980,7 +6230,6 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                             '<span class="lidar-value">' + statusText + '</span>' +
                             '</div>' +
                             btnHtml +
-                            selectHtml +
                             '</div>';
 
                         new maplibregl.Popup()
@@ -6165,20 +6414,9 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
 
             // ==================== 3D Viewer Methods ====================
 
-            toggleTileSelection: function(filename) {
-                if (this.selectedTiles[filename]) {
-                    delete this.selectedTiles[filename];
-                } else {
-                    this.selectedTiles[filename] = true;
-                }
-                this.update3dControls();
-            },
-
             update3dControls: function() {
                 var controlsDiv = document.getElementById('lidar3dControls');
-                var prepareBtn = document.getElementById('prepare3dBtn');
                 var viewBtn = document.getElementById('view3dBtn');
-                var selectedCountSpan = document.getElementById('selectedCount');
                 var statusDiv = document.getElementById('lidar3dStatus');
 
                 if (!controlsDiv) return;
@@ -6186,135 +6424,20 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                 // Show controls only when LiDAR is enabled
                 controlsDiv.style.display = this.enabled ? 'flex' : 'none';
 
-                // Update selected count
-                var selectedCount = Object.keys(this.selectedTiles).length;
-                if (selectedCountSpan) {
-                    selectedCountSpan.textContent = selectedCount;
-                }
-
-                // Enable/disable prepare button
-                if (prepareBtn) {
-                    prepareBtn.disabled = selectedCount === 0 || this.converting;
-                }
-
-                // Enable view button if there are converted tiles
-                var convertedCount = Object.keys(this.convertedTiles).length;
+                // Enable view button if there are downloaded tiles (LAZ loads directly in browser)
+                var downloadedCount = Object.keys(this.downloadedTiles).length;
                 if (viewBtn) {
-                    viewBtn.disabled = convertedCount === 0;
+                    viewBtn.disabled = downloadedCount === 0;
                 }
 
                 // Update status
-                if (statusDiv && convertedCount > 0) {
-                    statusDiv.textContent = convertedCount + ' tile(s) ready for 3D viewing';
-                }
-            },
-
-            startConversion: function() {
-                var self = this;
-                var selectedTiles = Object.keys(this.selectedTiles);
-
-                if (selectedTiles.length === 0) {
-                    alert('Please select tiles to convert');
-                    return;
-                }
-
-                if (this.converting) {
-                    alert('Conversion already in progress');
-                    return;
-                }
-
-                this.converting = true;
-                this.update3dControls();
-
-                var statusDiv = document.getElementById('lidar3dStatus');
                 if (statusDiv) {
-                    statusDiv.textContent = 'Starting conversion...';
+                    if (downloadedCount > 0) {
+                        statusDiv.textContent = downloadedCount + ' tile(s) ready for 3D viewing';
+                    } else {
+                        statusDiv.textContent = 'Download tiles to enable 3D viewing';
+                    }
                 }
-
-                // Start conversion
-                fetch(apiUrl('/api/orders/' + this.orderId + '/potree/convert'), {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({tiles: selectedTiles})
-                })
-                .then(function(response) {
-                    if (!response.ok) {
-                        return response.json().then(function(data) {
-                            throw new Error(data.error || 'Conversion failed');
-                        });
-                    }
-                    return response.json();
-                })
-                .then(function(data) {
-                    // Connect to progress stream
-                    self.connectToConversionProgress();
-                })
-                .catch(function(err) {
-                    self.converting = false;
-                    self.update3dControls();
-                    if (statusDiv) {
-                        statusDiv.textContent = 'Conversion failed: ' + err.message;
-                    }
-                    alert('Conversion failed: ' + err.message);
-                });
-            },
-
-            connectToConversionProgress: function() {
-                var self = this;
-                var statusDiv = document.getElementById('lidar3dStatus');
-
-                var eventSource = new EventSource(apiUrl('/api/orders/' + this.orderId + '/potree/convert/progress'));
-
-                eventSource.onmessage = function(event) {
-                    var data = JSON.parse(event.data);
-
-                    if (data.keepalive) return;
-
-                    if (data.status === 'converting') {
-                        if (statusDiv) {
-                            statusDiv.textContent = 'Converting tile ' + (data.tiles_done + 1) + ' of ' + data.tiles_total + ': ' + data.current_tile;
-                        }
-                    } else if (data.status === 'completed') {
-                        eventSource.close();
-                        self.converting = false;
-
-                        // Clear selection and reload tiles
-                        self.selectedTiles = {};
-                        self.loadTiles();
-
-                        if (statusDiv) {
-                            statusDiv.textContent = 'Conversion complete! ' + data.tiles_done + ' tile(s) converted.';
-                        }
-
-                        if (data.failed > 0) {
-                            alert('Conversion completed with ' + data.failed + ' failed tile(s)');
-                        } else {
-                            // Offer to open viewer
-                            if (confirm('Conversion complete! Open 3D viewer?')) {
-                                self.openViewer3d();
-                            }
-                        }
-                    } else if (data.status === 'error') {
-                        eventSource.close();
-                        self.converting = false;
-                        self.update3dControls();
-
-                        if (statusDiv) {
-                            statusDiv.textContent = 'Conversion error: ' + data.error;
-                        }
-                        alert('Conversion error: ' + data.error);
-                    }
-                };
-
-                eventSource.onerror = function() {
-                    eventSource.close();
-                    self.converting = false;
-                    self.update3dControls();
-
-                    if (statusDiv) {
-                        statusDiv.textContent = 'Connection lost during conversion';
-                    }
-                };
             },
 
             openViewer3d: function() {
@@ -6323,9 +6446,9 @@ def generate_dashboard_html(downloads_dir: Path) -> str:
                     return;
                 }
 
-                var convertedCount = Object.keys(this.convertedTiles).length;
-                if (convertedCount === 0) {
-                    alert('No tiles have been converted for 3D viewing yet');
+                var downloadedCount = Object.keys(this.downloadedTiles).length;
+                if (downloadedCount === 0) {
+                    alert('Download tiles first to view in 3D');
                     return;
                 }
 

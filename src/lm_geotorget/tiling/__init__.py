@@ -4,6 +4,7 @@ from .gpkg_reader import GeoPackageReader
 from .wkb_parser import wkb_to_geojson
 from .postgis_loader import PostGISLoader
 from .processor import DataProcessor
+from .copc_converter import CopcConverter
 
 __all__ = [
     "DataType",
@@ -13,4 +14,5 @@ __all__ = [
     "wkb_to_geojson",
     "PostGISLoader",
     "DataProcessor",
+    "CopcConverter",
 ]
