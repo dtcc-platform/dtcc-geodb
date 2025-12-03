@@ -1111,7 +1111,7 @@ def create_management_app(
 
     <div class="header">
         <h1>3D Point Cloud Viewer (COPC)</h1>
-        <a href="javascript:history.back()">Back to Dashboard</a>
+        <a id="dashboardLink" href="./">Back to Dashboard</a>
     </div>
 
     <div class="tile-list" id="tileList">
@@ -1137,6 +1137,8 @@ def create_management_app(
         <p style="margin-top: 15px;" id="loadingText">Initializing viewer...</p>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/laz-perf@0.0.3/lib/laz-perf.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/copc@0.0.6/dist/copc.umd.js"></script>
     <script type="importmap">
     {{
         "imports": {{
@@ -1157,6 +1159,10 @@ def create_management_app(
 
         // Make startConversion available globally
         window.startConversion = startConversion;
+
+        // Set dashboard link href
+        const basePath = window.location.pathname.replace(/\/viewer3d\/.*$/, '');
+        document.getElementById('dashboardLink').href = basePath + '/';
 
         function updateTileStatus(tileName, status) {{
             const itemEl = document.getElementById('tile-' + tileName.replace(/\\./g, '-'));
@@ -1214,8 +1220,8 @@ def create_management_app(
             try {{
                 document.getElementById('loadingText').textContent = 'Loading ' + tileName + '...';
 
-                // Import copc.js for COPC file reading
-                const copc = await import('https://cdn.jsdelivr.net/npm/copc@0.0.6/+esm');
+                // Use global Copc from UMD build (loaded via script tag)
+                const {{ Copc }} = window.copc;
 
                 // Create a getter function for range requests
                 const getter = async (begin, end) => {{
@@ -1228,10 +1234,10 @@ def create_management_app(
                 }};
 
                 // Load COPC metadata
-                const copcFile = await copc.Copc.create(getter);
+                const copcFile = await Copc.create(getter);
 
                 // Load hierarchy
-                const {{ nodes }} = await copc.Copc.loadHierarchyPage(getter, copcFile.info.rootHierarchyPage);
+                const {{ nodes }} = await Copc.loadHierarchyPage(getter, copcFile.info.rootHierarchyPage);
 
                 // Get all node keys and sort by depth (load coarser levels first)
                 const nodeKeys = Object.keys(nodes).sort((a, b) => {{
@@ -1254,7 +1260,7 @@ def create_management_app(
                     if (!node || node.pointCount === 0) continue;
 
                     try {{
-                        const view = await copc.Copc.loadPointDataView(getter, copcFile, node);
+                        const view = await Copc.loadPointDataView(getter, copcFile, node);
 
                         const pointCount = node.pointCount;
                         const positions = new Float32Array(pointCount * 3);
